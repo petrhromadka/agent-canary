@@ -72,13 +72,17 @@ def build_parser() -> argparse.ArgumentParser:
 def _cmd_plant(args: argparse.Namespace, state_dir: Path) -> int:
     from agent_canary.plant import KINDS, plant
 
-    manifest, warnings = plant(
-        args.workspace,
-        kinds=args.kinds or list(KINDS),
-        dns_domain=args.dns_domain,
-        http_url=args.http_url,
-        state_dir=state_dir,
-    )
+    try:
+        manifest, warnings = plant(
+            args.workspace,
+            kinds=args.kinds or list(KINDS),
+            dns_domain=args.dns_domain,
+            http_url=args.http_url,
+            state_dir=state_dir,
+        )
+    except (ValueError, FileExistsError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     print(f"token {manifest.token_id}: planted {len(manifest.files)} files in {manifest.workspace}")
@@ -168,7 +172,12 @@ def _cmd_clean(args: argparse.Namespace, state_dir: Path) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
     for manifest in targets:
-        for warning in clean(manifest, state_dir):
+        try:
+            warnings = clean(manifest, state_dir)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
         print(f"cleaned {manifest.token_id}")
     return 0
