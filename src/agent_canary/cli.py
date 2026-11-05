@@ -102,8 +102,12 @@ def _cmd_listen(args: argparse.Namespace, state_dir: Path) -> int:
         return store.load_all(state_dir)
 
     def on_alert(alert: Alert) -> None:
-        alerts.write_alert(alert, args.log)
+        # Console first, so a failing log (disk full, permissions) cannot swallow the alert.
         print(alerts.format_alert(alert), flush=True)
+        try:
+            alerts.write_alert(alert, args.log)
+        except Exception as exc:
+            print(f"error: alert log write failed: {type(exc).__name__}", file=sys.stderr)
 
     servers = []
     if args.http is not None:

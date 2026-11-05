@@ -1,8 +1,8 @@
 import json
 
-from agent_canary import alerts, store
+from agent_canary import alerts, cli, http_listener, store
 from agent_canary.detect import find_matches
-from agent_canary.models import Manifest, Secret
+from agent_canary.models import Manifest, Match, Secret
 
 
 def manifest(token_id: str = "abcdefgh2345") -> Manifest:
@@ -38,3 +38,32 @@ def test_alert_log_has_no_secret_value(tmp_path):
     assert "fake-value-123" not in text
     assert json.loads(text)["matches"][0]["name"] == "API_KEY"
     assert "\x1b" not in alerts.format_alert(alert)
+
+
+def test_listen_prints_alert_when_log_write_fails(tmp_path, monkeypatch, capsys):
+    m = manifest()
+    store.save(m, tmp_path / "state")
+
+    class OneAlertServer:
+        def __init__(self, host, port, *, manifests_loader, on_alert):
+            self.server_address = (host, port)
+            self.on_alert = on_alert
+
+        def serve_forever(self):
+            self.on_alert(
+                alerts.make_alert("http", "1.2.3.4:5", "GET /", [Match(m.token_id, None, "plain")])
+            )
+
+        def shutdown(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(http_listener, "HttpCanaryServer", OneAlertServer)
+    # The log path is a directory, so appending to it fails.
+    argv = ["--state-dir", str(tmp_path / "state"), "listen", "--http", "127.0.0.1:1"]
+    assert cli.main([*argv, "--log", str(tmp_path)]) == 0
+    out, err = capsys.readouterr()
+    assert f"CANARY HTTP from 1.2.3.4:5: GET / -> token {m.token_id}" in out
+    assert "error: alert log write failed: " in err
