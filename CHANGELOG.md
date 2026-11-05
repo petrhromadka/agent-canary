@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `listen --webhook URL` (repeatable) POSTs each alert as JSON (the log line plus `text` and
+  `content` for Slack, Mattermost and Discord) from one background thread with a bounded queue.
+  http(s) only, 5 s timeout, two retries, no redirects; errors name only the host.
+  `--webhook-header 'Name: value'` adds an auth header whose value is never printed.
+- `listen --exec CMD` runs a command per alert with the alert JSON on stdin, without a shell,
+  with a 10 s timeout.
+- `listen` stops cleanly on SIGTERM, SIGINT and (Windows) Ctrl+Break, flushing pending
+  notifications for up to 5 s, and creates the alert log at startup.
+- `report [LOG ...]` summarizes alert logs per token (first/last seen, channels, secrets,
+  encodings, sources), with `--json`; malformed lines are counted. Exits 1 when there are
+  alerts, 0 when none and 2 when a log cannot be read.
 - `plant` kinds `kube`, `docker`, `git` and `pypi`, on by default: `.kube/config` (cluster
   `server` is the canary URL or a `k8s.` canary host, bearer service account token),
   `.docker/config.json` (`auths` for a `registry.` canary host, base64 `deploy:<token>`),

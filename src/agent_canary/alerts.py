@@ -51,6 +51,14 @@ def write_alert(alert: Alert, log_path: Path | None) -> None:
             fh.write(line)
 
 
+def touch_log(log_path: Path) -> None:
+    """Create the log (and its directory) if missing, without changing existing content."""
+    with _lock:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8"):
+            pass
+
+
 class Dedup:
     """Remembers recently alerted keys; thread-safe and bounded."""
 
