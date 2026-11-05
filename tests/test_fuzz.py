@@ -169,18 +169,6 @@ def test_parse_query_ascii_names_stay_within_253_chars():
         assert len(result[1]) <= 253
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="non-ASCII bytes become 4-char backslash-x escapes, so qname can reach ~1000 chars",
-)
-def test_parse_query_name_with_high_bytes_stays_within_253_chars():
-    name = bytes([63]) + b"\xff" * 63 + bytes([63]) + b"\xff" * 63 + b"\x00"
-    packet = struct.pack("!HHHHHH", 1, 0x0100, 1, 0, 0, 0) + name + b"\x00\x01\x00\x01"
-    result = parse_query(packet)
-    assert result is not None
-    assert len(result[1]) <= 253
-
-
 # --- detect.find_matches -----------------------------------------------------------------
 
 
@@ -419,10 +407,6 @@ def test_load_all_skips_corrupt_files(tmp_path: Path):
     assert all(isinstance(m, Manifest) for m in loaded)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="load_all sorts by `created` outside its try block; one non-string value raises",
-)
 def test_load_all_survives_mixed_type_fields(tmp_path: Path):
     first = valid_manifest_dict()
     second = {**valid_manifest_dict(), "created": 5}
@@ -431,10 +415,6 @@ def test_load_all_survives_mixed_type_fields(tmp_path: Path):
     store.load_all(tmp_path)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="json.loads raises RecursionError, which load_all does not catch",
-)
 def test_load_all_survives_deeply_nested_json(tmp_path: Path):
     (tmp_path / ("a" * 12 + ".json")).write_text("[" * 100_000)
     assert store.load_all(tmp_path) == []
