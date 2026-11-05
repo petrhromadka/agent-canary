@@ -229,12 +229,15 @@ class _DnsHandler(socketserver.BaseRequestHandler):
         zone_at = index.zone(lower)
         end = len(lower) if zone_at is None else zone_at
         token_at = next((i for i in reversed(range(end)) if lower[i] in index.tokens), None)
-        cut = token_at if token_at is not None else zone_at  # labels left of it are payload
-        left = q.labels[:cut] if cut else ()
+        # Payload: every label except the token id and the canary domain, on either side.
+        if token_at is None:
+            payload = q.labels[:end]
+        else:
+            payload = q.labels[:token_at] + q.labels[token_at + 1 : end]
         # A secret may be split across labels to fit 63 bytes each: search them joined too.
-        texts = [_text(q.labels)] + ([_text(left).replace(".", "")] if len(left) > 1 else [])
+        texts = [_text(q.labels)] + ([_text(payload).replace(".", "")] if len(payload) > 1 else [])
         matches = index.find(texts)
-        alert = self._alert(server, q, lower, left, matches)
+        alert = self._alert(server, q, token_at, zone_at, matches)
 
         in_class = q.qclass in (QCLASS_IN, QCLASS_ANY)
         if zone_at is None or not in_class:
@@ -261,10 +264,11 @@ class _DnsHandler(socketserver.BaseRequestHandler):
         self,
         server: DnsCanaryServer,
         q: _Query,
-        lower: Sequence[bytes],
-        left: Sequence[bytes],
+        token_at: int | None,
+        zone_at: int | None,
         matches: list[Match],
     ) -> Alert | None:
+        lower = [label.lower() for label in q.labels]
         # Dedup by name only: lookups reach us through recursive resolvers, so retries of one
         # leak arrive from varying resolver addresses and the source says little about the leaker.
         if not matches or not server.dedup.first_seen(b".".join(lower)):
@@ -273,22 +277,30 @@ class _DnsHandler(socketserver.BaseRequestHandler):
             return None
         ip, port = self.client_address[:2]
         source = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
-        # Every label left of the token id (or of the canary domain) is replaced by REDACTED,
-        # except a lone plant tag, so no secret or part of one reaches the alert log.
-        # The rest is checked too, also with its dots removed, and redacted further while
-        # it shows a secret.
-        n = 0 if len(left) == 1 and _text(left).lower() in PLANT_TAGS else len(left)
-        rest = _text(q.labels[n:]).split(".")
-        candidates = [".".join(([REDACTED] if n else []) + rest)]
-        candidates += [".".join((REDACTED, *rest[i:])) for i in range(1, len(rest))]
-        detail = REDACTED
-        for candidate in candidates:
-            text = candidate[:MAX_NAME]
-            texts = [candidate, text, candidate.replace(".", "")]
-            if not any(m.secret for m in server.index.find(texts)):
-                detail = text
-                break
+        detail = _safe_name(q.labels, token_at, zone_at)
+        if any(m.secret for m in server.index.find([detail, detail.replace(".", "")])):
+            detail = REDACTED
         return alerts.make_alert("dns", source, detail, matches)
+
+
+def _safe_name(labels: Sequence[bytes], token_at: int | None, zone_at: int | None) -> str:
+    """The query name with every payload label replaced by one REDACTED marker.
+
+    Only the token id, the canary domain and a lone plant tag right before the token id
+    (`db.<token>.<domain>`) are kept, so no secret or part of one reaches the alert log.
+    """
+    end = len(labels) if zone_at is None else zone_at
+    zone = [_text(labels[zone_at:])] if zone_at is not None else []
+    if token_at is None:
+        return ".".join([REDACTED, *zone]) if end else ".".join(zone)
+    left = labels[:token_at]
+    right = labels[token_at + 1 : end]
+    if len(left) == 1 and _text(left).lower() in PLANT_TAGS:
+        head = [_text(left).lower()]
+    else:
+        head = [REDACTED] if left else []
+    middle = [REDACTED] if right else []
+    return ".".join([*head, _text(labels[token_at : token_at + 1]), *middle, *zone])[:MAX_NAME]
 
 
 class DnsCanaryServer(socketserver.UDPServer):

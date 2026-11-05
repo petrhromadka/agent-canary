@@ -114,7 +114,7 @@ def test_aaaa_nxdomain_refused(dns):
     assert len(alerts) == 2  # the CHAOS lookup still leaked the name
     # A token id outside every canary domain: not ours to answer, but still a leak.
     assert rcode(ask(query(f"a.{CANARY_ID}.example.org"))) == 5
-    assert len(alerts) == 3 and alerts[-1].detail == f"<redacted>.{CANARY_ID}.example.org"
+    assert len(alerts) == 3 and alerts[-1].detail == f"<redacted>.{CANARY_ID}.<redacted>"
 
 
 def test_apex_soa_ns_and_ns_host(dns):
@@ -180,7 +180,11 @@ def test_secret_in_a_label_is_redacted_from_the_alert(dns):
     # Whole, split across labels, and split with resolver case randomization (DNS 0x20).
     for name in (f"{value}.x", f"{value[:6]}.{value[6:]}", f"{value[:5].upper()}.{value[5:]}"):
         assert rcode(ask(query(f"{name}.{CANARY_ID}.{DOMAIN}"))) == 0
-    assert len(alerts) == 3
-    for alert in alerts:
+    # Split right of the token id, behind a plant tag: nothing of the value may survive.
+    assert rcode(ask(query(f"db.{CANARY_ID}.{value[:7]}.{value[7:]}.{DOMAIN}"))) == 0
+    assert len(alerts) == 4
+    for alert in alerts[:3]:
         assert alert.detail == f"<redacted>.{CANARY_ID}.{DOMAIN}"
+    assert alerts[3].detail == f"db.{CANARY_ID}.<redacted>.{DOMAIN}"
+    for alert in alerts:
         assert [m.secret.name for m in alert.matches if m.secret] == ["API_KEY"]
