@@ -364,6 +364,10 @@ def clean(manifest: Manifest, state_dir: Path) -> list[str]:
         if Path(rel).is_absolute() or not target.is_relative_to(ws) or target == ws:
             warnings.append(f"{rel!r} is outside the workspace, not touched")
             continue
+        path = ws / rel
+        if path.is_symlink() or path.is_junction() or not _same_path(target, path):
+            warnings.append(f"{rel} is reached through a link, not touched")
+            continue
         if not target.is_file():
             warnings.append(f"{rel} is missing")
             continue

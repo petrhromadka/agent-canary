@@ -157,6 +157,16 @@ def test_plant_and_clean_refuse_linked_or_blocked_directories(tmp_path):
     assert len(warnings) == 1 and "outside the workspace" in warnings[0]
     assert (real_aws / "config").read_text() == "keep me"
 
+    # Decoys moved behind a link that stays inside the workspace are not deleted through it.
+    ws2 = tmp_path / "ws2"
+    ws2.mkdir()
+    manifest, _ = plant(ws2, kinds=["aws"], state_dir=tmp_path / "state")
+    (ws2 / ".aws").rename(ws2 / "moved")
+    link_dir(ws2 / ".aws", ws2 / "moved")
+    warnings = clean(manifest, tmp_path / "state")
+    assert len(warnings) == 2 and all("through a link" in w for w in warnings)
+    assert sorted(p.name for p in (ws2 / "moved").iterdir()) == ["config", "credentials"]
+
 
 def test_failure_mid_plant_removes_everything_written(tmp_path, monkeypatch, capsys):
     ws = tmp_path / "ws"
