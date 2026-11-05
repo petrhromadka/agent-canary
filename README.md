@@ -163,11 +163,13 @@ A plain request for a canary URL, here `curl http://127.0.0.1:8080/t/ugwaxvh7nsg
 ```
 
 **5. Scan** a transcript or log the agent produced. Paths may be files or directories (searched
-recursively, skipping `.git`, `.venv` and `node_modules` and not following symlinked
-directories); with no path, or with `-`, `scan` reads stdin. The planted files themselves are
-skipped. Each file with a hit gives one alert, with the line of its first hit. Exit code 1 means a
-canary was found, 0 means none, 2 means an error (no planted canaries in the state directory, or
-a path that does not exist).
+recursively, skipping `.git`, `.venv` and `node_modules` unless you pass `--all`, and never
+following symlinks or junctions); with no path, or with `-`, `scan` reads stdin. The planted
+files themselves are skipped, and a `skipped:` line on stderr counts what was left out. Each file
+with a hit gives one alert, with the line of its first hit. Exit code 1 means a canary was found,
+0 means none, 2 means an error: no planted canaries in the state directory, or a path that does
+not exist, cannot be read, or is not a regular file or directory. Errors are printed to stderr
+and win over found canaries, which are still printed, so an unreadable file never passes as clean.
 
 Here line 3 of the transcript is a tool call that sent the `API_KEY` value from `.env` in a `curl`
 command:
@@ -179,6 +181,7 @@ $ echo $?
 1
 $ agent-canary scan ~/project
 no canaries found
+skipped: 3 planted decoys, 1 dir (.git)
 $ echo $?
 0
 ```

@@ -59,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("scan", help="search files or stdin (transcripts, proxy logs) for canaries")
     p.add_argument("paths", nargs="*", default=["-"], help="files or directories; '-' is stdin")
     p.add_argument("--log", type=Path, default=None, help="also append alerts to this log")
+    p.add_argument(
+        "--all", action="store_true", help="also search .git, .venv and node_modules directories"
+    )
 
     sub.add_parser("list", help="show planted canaries")
 
@@ -146,17 +149,19 @@ def _cmd_scan(args: argparse.Namespace, state_dir: Path) -> int:
     if not manifests:
         print("error: no planted canaries in the state dir", file=sys.stderr)
         return 2
-    missing = [p for p in args.paths if p != "-" and not Path(p).exists()]
-    if missing:
-        print(f"error: no such file or directory: {', '.join(missing)}", file=sys.stderr)
-        return 2
-    found = scan_paths(args.paths, manifests)
-    for alert in found:
+    result = scan_paths(args.paths, manifests, all_dirs=args.all)
+    for alert in result.alerts:
         alerts.write_alert(alert, args.log)
         print(alerts.format_alert(alert))
-    if not found:
+    if not result.alerts and not result.errors:
         print("no canaries found")
-    return 1 if found else 0
+    for path, reason in result.errors:
+        print(f"error: {alerts.sanitize(path)}: {reason}", file=sys.stderr)
+    if summary := result.skipped_summary():
+        print(summary, file=sys.stderr)
+    if result.errors:
+        return 2
+    return 1 if result.alerts else 0
 
 
 def _cmd_list(_: argparse.Namespace, state_dir: Path) -> int:
