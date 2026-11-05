@@ -28,8 +28,8 @@ endpoints and the transcripts the agent leaves behind.
   not covered.
 - It does not see traffic to hosts you do not control. A decoy sent to an attacker's server is
   caught only if `scan` later finds it in a transcript or proxy log you captured.
-- It does not recognise encrypted, compressed, split or paraphrased values. Only plain, percent-,
-  base64- and hex-encoded copies are found.
+- It does not recognise encrypted, compressed, split or paraphrased values. Only the encodings
+  listed under [Limits](#limits-and-false-positives) are found, and several common ones are not.
 - It does not prove an agent is safe. No alert means no detected leak; the agent may have ignored
   the decoys or recognised them as fake.
 - It does not hook into the agent: no prompt filtering, no model access, no process monitoring.
@@ -58,19 +58,27 @@ flowchart LR
   and URLs inside the decoys embed that id: `<tag>.<token_id>.<dns_domain>` and
   `<http_url>/t/<token_id>/<tag>`. The random secret values and the token id are saved in a
   manifest in the state directory, which must be outside the workspace.
-- `listen` runs a DNS listener, an HTTP listener or both. They re-read the manifests on every
-  request, so canaries planted while `listen` runs are picked up without a restart.
-  - The DNS listener (UDP) answers `A` queries for any name that contains a token id or a
-    planted secret, `NXDOMAIN` for other names under a planted `--dns-domain` and `REFUSED` for
-    everything else, so it is never an open resolver. Repeated lookups of the same name within
-    60 seconds raise one alert.
+- `listen` runs a DNS listener, an HTTP listener or both. They cache the manifests and reload
+  them when the state directory changes (within about 1 second), so canaries planted while
+  `listen` runs are picked up without a restart.
+  - The DNS listener (UDP) serves only `A`, `SOA` and `NS` for its zone. It answers `A` queries
+    for any name that contains a token id or a planted secret. The zone apex answers `NOERROR`
+    with `SOA` and `NS` records (`ns1.<domain>`, `hostmaster.<domain>`). Other names under a
+    planted `--dns-domain` get `NXDOMAIN` or an empty `NODATA` answer, both carrying an `SOA`
+    (negative TTL 60) so resolvers do not drop the zone. Queries with an opcode other than
+    `QUERY` get `NOTIMP`, and queries of a class other than `IN` get `REFUSED`, as does
+    everything outside a planted domain, so it is never an open resolver. A token id seen
+    outside every canary domain still raises an alert but is answered `REFUSED`. Secrets are
+    matched case-insensitively (resolvers randomize case), and a secret split across several
+    labels is detected. Repeated lookups of the same name within 60 seconds raise one alert,
+    and each token is limited to about 30 DNS alerts per minute.
   - The HTTP listener answers every parsable request, whatever the method, with `200` and the
     body `ok` (HTTP/1.1 with `Connection: close`). It alerts when the request line, headers,
     body or percent-decoded path and query contain a token id or a planted secret, in plain form
-    or percent-, base64- or hex-encoded. Repeated HTTP alerts are also suppressed for 60
+    or percent-, base64-, hex- or JSON-escaped. Repeated HTTP alerts are also suppressed for 60
     seconds.
 - `scan` does the same search offline over agent transcripts or proxy logs. It exits with 1 if
-  anything was found.
+  anything was found and 2 if anything could not be read.
 
 The tool itself never sends anything anywhere. The DNS listener only helps if the domain is
 delegated to the machine it runs on; see [docs/deploy.md](docs/deploy.md).
@@ -163,11 +171,20 @@ A plain request for a canary URL, here `curl http://127.0.0.1:8080/t/ugwaxvh7nsg
 ```
 
 **5. Scan** a transcript or log the agent produced. Paths may be files or directories (searched
-recursively, skipping `.git`, `.venv` and `node_modules` and not following symlinked
-directories); with no path, or with `-`, `scan` reads stdin. The planted files themselves are
-skipped. Each file with a hit gives one alert, with the line of its first hit. Exit code 1 means a
-canary was found, 0 means none, 2 means an error (no planted canaries in the state directory, or
-a path that does not exist).
+recursively, skipping `.git`, `.venv` and `node_modules` unless you pass `--all`); with no path,
+or with `-`, `scan` reads stdin. The planted files themselves are skipped. Each file with a hit
+gives one alert, with the line of its first hit. Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | No canary found and everything was readable. |
+| 1 | A canary was found and everything was readable. |
+| 2 | An error: no planted canaries in the state directory, a path that does not exist, a FIFO or device given as an argument, or any file or directory that could not be read. |
+
+Unreadable files and directories are reported on stderr and force exit code 2 even if leaks were
+found too, so a 2 does not mean "clean". Symlink and junction loops are pruned, and symlinked
+files inside a directory are not read. `scan` ends with a `skipped: ...` summary line on stderr
+that reports what was left out.
 
 Here line 3 of the transcript is a tool call that sent the `API_KEY` value from `.env` in a `curl`
 command:
@@ -184,7 +201,8 @@ $ echo $?
 ```
 
 The second scan covers the planted workspace itself and finds nothing, because the decoy files are
-skipped. Add `--log alerts.jsonl` to also append scan alerts to a JSON Lines log.
+skipped. Add `--log alerts.jsonl` to also append scan alerts to a JSON Lines log, and `--all` to
+also search `.git`, `.venv` and `node_modules`.
 
 **6. Clean up** when the run is over:
 
@@ -237,10 +255,10 @@ The HTTP and DNS alerts from the quickstart run above, as logged:
 | `time` | UTC timestamp, ISO 8601, in seconds |
 | `channel` | `dns`, `http` or `scan` |
 | `source` | `ip:port` of the client (`[ip]:port` for IPv6); for `scan`, the file path or `<stdin>` |
-| `detail` | DNS name as queried, `METHOD /path` (at most 200 characters), or `line N` for scan |
+| `detail` | DNS name as queried, with the labels left of the token id always redacted; `METHOD /path` (at most 200 characters); or `line N` for scan |
 | `matches[].token_id` | Token id of the planting run |
 | `matches[].kind`, `path`, `name` | Which planted secret matched; `null` when only the token id was seen |
-| `matches[].encoding` | How it appeared: `plain`, `url` (percent-encoded), `base64` or `hex` |
+| `matches[].encoding` | How it appeared: `plain`, `url` (percent-encoded), `base64`, `hex` or `json` (`\/` or `\u002f`-style escapes) |
 
 A token-id-only match is dropped when a secret of the same token appears in the same data, which
 is why the HTTP alert above lists five secrets and not the token. The console line has control
@@ -270,11 +288,26 @@ each alert back to the run that planted that id with `agent-canary list` or your
   hostname without the agent acting on it. A DNS alert says the name was resolved, not that the
   agent chose to. HTTP hits on a canary URL are stronger evidence; a request that carries a
   planted secret is the strongest.
-- **Third-party exfiltration.** If the agent sends the secrets to a host you do not control, such
-  as a webhook service or a public paste site, the listeners see nothing. Only `scan` over the
-  agent's transcript or your proxy logs can catch that.
-- **Transformed secrets.** The search covers plain, base64-, hex- and percent-encoded forms.
-  Encryption, compression, splitting a value across requests or paraphrasing it defeats it.
+- **Third-party exfiltration.** If the agent sends the secrets to any host you do not control,
+  such as a webhook service or a public paste site, the listeners see nothing. Only `scan` over
+  the agent's transcript or your proxy logs can catch that.
+- **`scan` sees only what was logged.** A transcript that omits tool output, a proxy that does
+  not record bodies, or a truncated log hides a leak from it.
+- **Detected encodings.** Plain text; percent-encoding; base64 (standard and URL-safe, also
+  wrapped at 64 or 76 columns or with JSON-escaped newlines); hex; JSON escapes (`\/` and
+  `\u002f`-style, reported as `json`); and UTF-16LE text, as PowerShell 5.1 redirection writes
+  it.
+- **Not detected** (each reproduced in an audit):
+  - gzip-compressed data that is then base64-encoded;
+  - base32;
+  - `xxd`-style grouped hex, or `\xNN` escapes;
+  - double URL-encoding such as `%252F`;
+  - a secret split across streaming deltas in an LLM-API proxy log, since no single record
+    holds the whole value;
+  - encryption, other compression, splitting a value across requests, and paraphrasing.
+- **DNS needs a path to the internet.** The listener serves only `A`, `SOA` and `NS` for its
+  zone, and DNS-based detection works only if the agent's resolver can reach the internet and
+  follow the delegation to your listener. In an offline sandbox no DNS alert arrives.
 - **Agent skepticism.** A capable agent may notice that the credentials are fake or never use
   them. No alert means no detected leak, not proof of safety.
 - **Offline listeners.** Alerts are lost if a listener is down; the listeners' 60 s dedup also

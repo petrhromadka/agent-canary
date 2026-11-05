@@ -18,19 +18,27 @@ All names and addresses below are placeholders: `example.com` stands for your do
 `agent-canary listen` runs two servers that watch for the fake credentials `plant` wrote
 into an agent's workspace:
 
-- **DNS (UDP):** answers an `A` query for any name that contains a token id or a planted
-  secret with the `--answer-ip` address. When an agent resolves, say, the `DATABASE_URL`
-  host `db.<token_id>.<dns_domain>`, the query reaches your listener and becomes an alert.
-  Other names under a planted `--dns-domain` get `NXDOMAIN`; names outside every planted
-  domain get `REFUSED`, so the listener is never an open resolver.
+- **DNS (UDP):** serves only `A`, `SOA` and `NS` for its zone. It answers an `A` query for
+  any name that contains a token id or a planted secret with the `--answer-ip` address. When
+  an agent resolves, say, the `DATABASE_URL` host `db.<token_id>.<dns_domain>`, the query
+  reaches your listener and becomes an alert. The zone apex answers `NOERROR` with `SOA` and
+  `NS` records. Other names under a planted `--dns-domain` get `NXDOMAIN` (or an empty
+  `NODATA` answer), carrying an `SOA` with a negative TTL of 60 s. Names outside every
+  planted domain, and queries of a class other than `IN`, get `REFUSED`, so the listener is
+  never an open resolver; an opcode other than `QUERY` gets `NOTIMP`. A token id seen
+  outside every canary domain still raises an alert but is answered `REFUSED`. Secrets are
+  matched case-insensitively, because resolvers randomize the case of names, and a secret
+  split across labels is detected. The `detail` of a DNS alert never shows the labels left
+  of the token id.
 - **HTTP:** answers every parsable request with `200 ok` and raises an alert for any
   request whose request line, path or query carries a token id (as in `/t/<token_id>/<tag>`)
   or whose headers or body carry a planted secret, including base64-, percent- and
   hex-encoded copies.
 
-Both listeners re-read the manifests in the state directory on every request, so canaries
-planted later are picked up without a restart. Each listener suppresses repeated alerts for
-60 seconds. Every detection is appended as one JSON line to the `--log` file and printed
+Both listeners cache the manifests and reload them when the state directory changes (within
+about 1 second), so canaries planted later are picked up without a restart. Each listener
+suppresses repeated alerts for 60 seconds, and the DNS listener also limits each token to
+about 30 alerts per minute. Every detection is appended as one JSON line to the `--log` file and printed
 to stdout. No secret value is written to the log or the console, only which secret was
 seen.
 
@@ -81,9 +89,13 @@ queries to your listener.
    every name under the delegated domain that carries no token id, so a nameserver or web
    host inside it would not resolve. (If your provider requires the nameserver inside the
    subdomain, the parent then needs a glue `A` record for it, and resolvers that re-query
-   the child for that name will get `NXDOMAIN`.)
-3. Check the delegation: `dig +trace db.anytoken.metrics.example.com` should end at
-   `203.0.113.10` with `NXDOMAIN` (there is no such token), and the listener shows no alert.
+   the child for that name will get `NXDOMAIN`.) The listener names itself
+   `ns1.metrics.example.com` in the `NS` and `SOA` records it serves at the apex; that name
+   is informational and does not have to resolve.
+3. Check the delegation: `dig +trace metrics.example.com SOA` should end at `203.0.113.10`
+   with `NOERROR` and the `SOA`, and `dig +trace db.anytoken.metrics.example.com` should end
+   with `NXDOMAIN` plus an `SOA` in the authority section. Names without a token id raise no
+   alert.
 4. Run `plant` with the matching domain and URL, as the workspace's owner on the machine
    where the agent runs, with a state directory the agent cannot read:
 
@@ -97,9 +109,12 @@ queries to your listener.
    `dig db.<token_id>.metrics.example.com` returns the `--answer-ip` address and raises a
    DNS alert.
 
-The listener is not a full authoritative server: it serves no `SOA` or `NS` records, and
-the zone apex `metrics.example.com` itself gets `NXDOMAIN`. Resolvers follow the parent's
-delegation, but test from the networks your agents use before relying on DNS alerts.
+The listener is not a full authoritative server: it serves only `A`, `SOA` and `NS`. The
+zone apex `metrics.example.com` answers `NOERROR` with `SOA` and `NS`
+(`ns1.metrics.example.com`, `hostmaster.metrics.example.com`), and `NXDOMAIN` and `NODATA`
+answers carry an `SOA` with a negative TTL of 60 s, so resolvers do not mark the zone as
+broken. Test from the networks your agents use before relying on DNS alerts, and note that
+DNS-based detection needs the agent's resolver to reach the internet.
 
 ## 4. Binding UDP/53 without running as root
 
@@ -123,7 +138,9 @@ sudo iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
 These rules act on traffic arriving from other hosts (prerouting), not on queries sent
 from the VPS itself, and they do not survive a reboot: add them to `/etc/nftables.conf`
 (or your iptables persistence tool). Then use `--dns 0.0.0.0:5300` in the unit below and
-drop its capability lines.
+drop its capability lines. To serve IPv6 as well, bind `--dns [::]:PORT` instead: it is
+dual-stack, so one listener answers both IPv4 and IPv6 (add an `AAAA` record for the
+nameserver host and, with option A, a matching `ip6` redirect rule).
 
 **Option B - grant the capability to bind low ports** with the unit's
 `AmbientCapabilities=CAP_NET_BIND_SERVICE` (section 5) and bind `0.0.0.0:53` directly.
@@ -270,14 +287,24 @@ credentials:
   esac
   ```
 
-`scan` also recognizes base64-, percent- and hex-encoded copies of the secrets, so an agent
-that re-encodes a key before leaking it is still caught.
+Exit `2` also covers any file or directory that could not be read (reported on stderr), even
+when leaks were found too, and a FIFO or device given as an argument. `scan` skips `.git`,
+`.venv` and `node_modules` unless you pass `--all`.
+
+`scan` also recognizes percent-, base64-, hex- and JSON-escaped copies of the secrets (base64
+wrapped at 64 or 76 columns included) and UTF-16LE text, so an agent that re-encodes a key
+before leaking it is usually still caught. The README's "Limits and false positives" lists the
+forms that are not detected: gzip+base64, base32, `xxd`-style hex, double URL-encoding, and
+secrets split across streamed chunks.
 
 ## 9. Limits
 
 - An agent that **never touches the planted files**, or that exfiltrates to a **third-party
   host** you do not control, will not hit the DNS or HTTP listeners. It is caught only by
-  `scan` of transcripts and proxy logs, which requires that you capture those.
+  `scan` of transcripts and proxy logs, which requires that you capture those. `scan` can
+  only see what was logged.
+- **DNS needs the internet.** DNS-based detection works only if the agent's resolver can
+  reach the internet and follow the delegation to your listener.
 - **DNS prefetching** by editors, shells, or tooling can resolve a planted hostname with no
   malicious intent, producing a DNS alert that is not an exfiltration. Treat a lone DNS
   alert as weaker evidence than an HTTP alert that carried an actual secret value.
