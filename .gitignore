@@ -9,3 +9,6 @@ dist/
 *.key
 alerts*.jsonl
 .agent-canary/
+.aws/
+.ssh/
+.npmrc
