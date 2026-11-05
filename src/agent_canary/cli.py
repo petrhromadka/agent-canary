@@ -59,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("scan", help="search files or stdin (transcripts, proxy logs) for canaries")
     p.add_argument("paths", nargs="*", default=["-"], help="files or directories; '-' is stdin")
     p.add_argument("--log", type=Path, default=None, help="also append alerts to this log")
+    p.add_argument(
+        "--all", action="store_true", help="also search .git, .venv and node_modules directories"
+    )
 
     sub.add_parser("list", help="show planted canaries")
 
@@ -72,13 +75,17 @@ def build_parser() -> argparse.ArgumentParser:
 def _cmd_plant(args: argparse.Namespace, state_dir: Path) -> int:
     from agent_canary.plant import KINDS, plant
 
-    manifest, warnings = plant(
-        args.workspace,
-        kinds=args.kinds or list(KINDS),
-        dns_domain=args.dns_domain,
-        http_url=args.http_url,
-        state_dir=state_dir,
-    )
+    try:
+        manifest, warnings = plant(
+            args.workspace,
+            kinds=args.kinds or list(KINDS),
+            dns_domain=args.dns_domain,
+            http_url=args.http_url,
+            state_dir=state_dir,
+        )
+    except (ValueError, OSError) as exc:
+        print(f"error: {alerts.sanitize(str(exc), limit=1000)}", file=sys.stderr)
+        return 2
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     print(f"token {manifest.token_id}: planted {len(manifest.files)} files in {manifest.workspace}")
@@ -94,12 +101,15 @@ def _cmd_listen(args: argparse.Namespace, state_dir: Path) -> int:
     if args.http is None and args.dns is None:
         args.http = ("127.0.0.1", 8080)
 
-    def loader() -> list:
-        return store.load_all(state_dir)
+    loader = store.CachedLoader(state_dir)  # one per process: rereads only changed manifests
 
     def on_alert(alert: Alert) -> None:
-        alerts.write_alert(alert, args.log)
+        # Console first, so a failing log (disk full, permissions) cannot swallow the alert.
         print(alerts.format_alert(alert), flush=True)
+        try:
+            alerts.write_alert(alert, args.log)
+        except Exception as exc:
+            print(f"error: alert log write failed: {type(exc).__name__}", file=sys.stderr)
 
     servers = []
     if args.http is not None:
@@ -138,21 +148,27 @@ def _cmd_scan(args: argparse.Namespace, state_dir: Path) -> int:
     if not manifests:
         print("error: no planted canaries in the state dir", file=sys.stderr)
         return 2
-    found = scan_paths(args.paths, manifests)
-    for alert in found:
+    result = scan_paths(args.paths, manifests, all_dirs=args.all)
+    for alert in result.alerts:
         alerts.write_alert(alert, args.log)
         print(alerts.format_alert(alert))
-    if not found:
+    if not result.alerts and not result.errors:
         print("no canaries found")
-    return 1 if found else 0
+    for path, reason in result.errors:
+        print(f"error: {alerts.sanitize(path)}: {reason}", file=sys.stderr)
+    if summary := result.skipped_summary():
+        print(summary, file=sys.stderr)
+    if result.errors:
+        return 2
+    return 1 if result.alerts else 0
 
 
 def _cmd_list(_: argparse.Namespace, state_dir: Path) -> int:
     manifests = store.load_all(state_dir)
     if not manifests:
         print("no planted canaries")
-    for m in manifests:
-        print(f"{m.token_id}  {m.created}  {len(m.files)} files  {m.workspace}")
+    for m in manifests:  # manifest text is untrusted: the state dir may have been tampered with
+        print(alerts.sanitize(f"{m.token_id}  {m.created}  {len(m.files)} files  {m.workspace}"))
     return 0
 
 
@@ -165,11 +181,16 @@ def _cmd_clean(args: argparse.Namespace, state_dir: Path) -> int:
         try:
             targets = [store.load(args.token_id, state_dir)]
         except (ValueError, OSError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            print(f"error: {alerts.sanitize(str(exc))}", file=sys.stderr)
             return 2
     for manifest in targets:
-        for warning in clean(manifest, state_dir):
-            print(f"warning: {warning}", file=sys.stderr)
+        try:
+            warnings = clean(manifest, state_dir)
+        except (ValueError, OSError) as exc:
+            print(f"error: {alerts.sanitize(str(exc))}", file=sys.stderr)
+            return 2
+        for warning in warnings:
+            print(f"warning: {alerts.sanitize(warning)}", file=sys.stderr)
         print(f"cleaned {manifest.token_id}")
     return 0
 
