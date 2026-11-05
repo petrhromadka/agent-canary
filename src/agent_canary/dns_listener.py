@@ -11,6 +11,7 @@ import ipaddress
 import socket
 import socketserver
 import struct
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -106,7 +107,8 @@ class _DnsHandler(socketserver.BaseRequestHandler):
         txid, qname, qtype, question_end = parsed
         lowered = qname.lower()
         manifests = server.manifests_loader()
-        matches = find_matches(lowered, manifests)
+        # Token ids match case-insensitively; secret values only in their original case.
+        matches = find_matches(f"{qname} {lowered}", manifests)
 
         answers = b""
         if matches:
@@ -122,12 +124,15 @@ class _DnsHandler(socketserver.BaseRequestHandler):
         (flags,) = struct.unpack_from("!H", packet, 2)
         resp_flags = 0x8000 | (flags & 0x7800) | 0x0400 | (flags & 0x0100) | rcode
         header = _HEADER.pack(txid, resp_flags, 1, 1 if answers else 0, 0, 0)
-        sock.sendto(header + packet[_HEADER.size : question_end] + answers, self.client_address)
-
-        if matches and server.dedup.first_seen(lowered):
-            ip, port = self.client_address[:2]
-            source = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
-            server.on_alert(alerts.make_alert("dns", source, qname, matches))
+        response = header + packet[_HEADER.size : question_end] + answers
+        # Alert before answering, so a client that got the answer can rely on the alert existing.
+        try:
+            if matches and server.dedup.first_seen(lowered):
+                ip, port = self.client_address[:2]
+                source = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
+                server.on_alert(alerts.make_alert("dns", source, qname, matches))
+        finally:
+            sock.sendto(response, self.client_address)
 
 
 class DnsCanaryServer(socketserver.ThreadingUDPServer):
@@ -150,4 +155,7 @@ class DnsCanaryServer(socketserver.ThreadingUDPServer):
         super().__init__((host, port), _DnsHandler)
 
     def handle_error(self, request: object, client_address: object) -> None:
-        """Drop the failed request silently: one bad packet must not stop or spam the server."""
+        """Keep serving; report only the exception type (e.g. a failed alert-log write)."""
+        exc = sys.exception()
+        if exc is not None and not isinstance(exc, OSError):
+            print(f"dns listener: handler error {type(exc).__name__}", file=sys.stderr)
