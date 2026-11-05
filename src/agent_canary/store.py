@@ -7,6 +7,8 @@ import json
 import os
 import re
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from agent_canary.models import Manifest
@@ -78,3 +80,45 @@ def load_all(state_dir: Path) -> list[Manifest]:
 
 def remove(token_id: str, state_dir: Path) -> None:
     _path(state_dir, token_id).unlink(missing_ok=True)
+
+
+class CachedLoader:
+    """`load_all(state_dir)` as a callable that rereads manifests only when they changed.
+
+    The directory's mtime and the (name, mtime_ns, size) of every *.json file are compared
+    at most once per `interval` seconds; the manifests are reread only when they differ.
+    Thread-safe. Returns the same list object while nothing changed: do not mutate it.
+    """
+
+    def __init__(self, state_dir: Path, interval: float = 1.0) -> None:
+        self._state_dir = state_dir
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._checked: float | None = None
+        self._fingerprint: object = None
+        self._manifests: list[Manifest] = []
+
+    def _current(self) -> object:
+        try:
+            dir_mtime = self._state_dir.stat().st_mtime_ns
+            entries = set()
+            with os.scandir(self._state_dir) as it:
+                for entry in it:
+                    if entry.name.endswith(".json"):
+                        with contextlib.suppress(OSError):
+                            st = entry.stat()
+                            entries.add((entry.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            return None
+        return dir_mtime, frozenset(entries)
+
+    def __call__(self) -> list[Manifest]:
+        with self._lock:
+            now = time.monotonic()
+            if self._checked is None or now - self._checked >= self._interval:
+                self._checked = now
+                fingerprint = self._current()
+                if fingerprint != self._fingerprint:
+                    self._fingerprint = fingerprint
+                    self._manifests = load_all(self._state_dir)
+            return self._manifests
