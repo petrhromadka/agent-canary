@@ -203,7 +203,7 @@ $ echo $?
 1
 $ agent-canary scan ~/project
 no canaries found
-skipped: 7 planted decoys, 1 dir (.git)
+skipped: 11 planted decoys, 1 dir (.git)
 $ echo $?
 0
 ```
