@@ -172,12 +172,23 @@ def test_parse_query_ascii_names_stay_within_253_chars():
 # --- detect.find_matches -----------------------------------------------------------------
 
 
+def wrap76(encoded: bytes) -> bytes:
+    """Base64 text in 76-column lines, as `base64` (coreutils) writes it."""
+    return b"\n".join(encoded[i : i + 76] for i in range(0, len(encoded), 76))
+
+
 def random_haystack(rng: random.Random, size: int) -> bytes:
-    kind = rng.choice(["bytes", "text", "base64", "hex"])
+    kind = rng.choice(["bytes", "text", "base64", "wrapped", "hex", "utf-16"])
     if kind == "bytes":
         return rng.randbytes(size)
     if kind == "text":
         return "".join(rng.choices(TEXT_ALPHABET + string.punctuation, k=size)).encode()
+    if kind == "wrapped":
+        encoded = base64.b64encode(rng.randbytes(size * 3 // 4))
+        return wrap76(encoded)
+    if kind == "utf-16":
+        text = "".join(rng.choices(TEXT_ALPHABET + string.punctuation, k=size // 2))
+        return text.encode("utf-16-le")
     if kind == "base64":
         return base64.b64encode(rng.randbytes(size * 3 // 4))
     return rng.randbytes(size // 2).hex().encode()
@@ -226,6 +237,7 @@ def base64_forms(rng: random.Random, value: str) -> list[bytes]:
         base64.urlsafe_b64encode(blob),
         base64.urlsafe_b64encode(blob).rstrip(b"="),
         quote(standard.decode(), safe="").encode(),
+        wrap76(standard),
     ]
 
 
@@ -248,6 +260,7 @@ def test_planted_value_found_in_plain_percent_and_hex_forms():
             re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), quote(value, safe="")).encode(),
             raw.hex().encode(),
             raw.hex().upper().encode(),
+            value.encode("utf-16-le"),
         ]
         for form in forms:
             assert_found(plant_in_text(rng, form), manifests, target, value)
