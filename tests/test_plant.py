@@ -1,15 +1,16 @@
 import base64
 import dataclasses
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 
 import pytest
 
-from agent_canary import store
+from agent_canary import detect, store
 from agent_canary.cli import main
-from agent_canary.plant import clean, plant
+from agent_canary.plant import KINDS, clean, plant
 
 DNS = "t.example.net"
 URL = "http://203.0.113.5:8080/"
@@ -30,8 +31,10 @@ def test_plant_writes_realistic_files_and_manifest(tmp_path):
     assert warnings == []
     assert store.load(tid, tmp_path / "state") == manifest
     assert manifest.http_url == URL.rstrip("/") and manifest.dns_domain == DNS
-    assert {s.kind for s in manifest.secrets} == {"aws", "env", "ssh", "npm"}
+    assert {s.kind for s in manifest.secrets} == set(KINDS)
     for secret in manifest.secrets:
+        if secret.kind == "docker":
+            continue  # stored base64-encoded in the auth field, checked below
         assert secret.value in (ws / secret.path).read_text(encoding="utf-8"), secret.name
     for rel in manifest.files:
         text = (ws / rel).read_text(encoding="utf-8").replace(str(ws.as_posix()), "")
@@ -52,6 +55,22 @@ def test_plant_writes_realistic_files_and_manifest(tmp_path):
     assert blob.startswith(b"openssh-key-v1\0")
     ssh_line = next(s.value for s in manifest.secrets if s.name == "ssh_private_key")
     assert ssh_line in body and body.index(ssh_line) >= 2
+
+    value = {s.name: s.value for s in manifest.secrets}
+    kube = (ws / ".kube/config").read_text()
+    assert f"    server: {URL}t/{tid}/k8s\n" in kube and "insecure-skip" not in kube
+    assert f"    token: {value['kube_token']}\n" in kube
+    assert f"repository = {URL}t/{tid}/pypi\n" in (ws / ".pypirc").read_text()
+    git_line = f"https://deploy:{value['git_token']}@git.{tid}.{DNS}\n"
+    assert (ws / ".git-credentials").read_text() == git_line
+    auths = json.loads((ws / ".docker/config.json").read_text())
+    assert "credsStore" not in auths
+    auth = auths["auths"][f"registry.{tid}.{DNS}"]["auth"]
+    assert base64.b64decode(auth) == f"deploy:{value['registry_token']}".encode()
+    found = detect.find_matches(f"Authorization: Basic {auth}", [manifest])
+    assert [(m.secret and m.secret.name, m.encoding) for m in found] == [
+        ("registry_token", "base64")
+    ]
 
     other, _ = plant_all(tmp_path, "ws2")
     assert other.token_id != tid
@@ -91,6 +110,19 @@ def test_plant_refuses_bad_input_and_keeps_existing_files(tmp_path, capsys):
     assert (ws / ".env").read_text() == "MINE=1\n"
     assert manifest.files == (".npmrc",) and len(warnings) == 1
     assert "db.internal" not in (ws / ".npmrc").read_text()
+
+    # Without --dns-domain and --http-url the hosts fall back to names that do not resolve.
+    manifest, _ = plant(ws, kinds=["kube", "docker", "git", "pypi"], state_dir=tmp_path / "state")
+    assert "server: https://k8s.internal:6443\n" in (ws / ".kube/config").read_text()
+    assert '"registry.internal:5000"' in (ws / ".docker/config.json").read_text()
+    assert (ws / ".git-credentials").read_text().endswith("@git.internal\n")
+    assert "repository = https://pypi.internal/legacy/\n" in (ws / ".pypirc").read_text()
+    dns_only = tmp_path / "dns_only"
+    dns_only.mkdir()
+    manifest, _ = plant(dns_only, kinds=["kube", "pypi"], dns_domain=DNS, state_dir=tmp_path / "s")
+    tid = manifest.token_id
+    assert f"server: https://k8s.{tid}.{DNS}\n" in (dns_only / ".kube/config").read_text()
+    assert f"https://pypi.{tid}.{DNS}/legacy/\n" in (dns_only / ".pypirc").read_text()
 
     assert main(["--state-dir", str(tmp_path / "state"), "plant", str(ws), "--kinds", "env"]) == 2
     assert "error: nothing planted" in capsys.readouterr().err
@@ -145,7 +177,14 @@ def test_plant_and_clean_refuse_linked_or_blocked_directories(tmp_path):
 
     manifest, warnings = plant(ws, http_url=URL, state_dir=tmp_path / "state")
     assert list(real_aws.iterdir()) == []
-    assert manifest.files == (".env", ".npmrc")
+    assert manifest.files == (
+        ".env",
+        ".npmrc",
+        ".kube/config",
+        ".docker/config.json",
+        ".git-credentials",
+        ".pypirc",
+    )
     assert len(warnings) == 5 and all("not written" in w for w in warnings)
 
     # A tampered manifest naming a planted path behind the link does not reach outside.

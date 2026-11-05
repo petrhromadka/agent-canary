@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `plant` kinds `kube`, `docker`, `git` and `pypi`, on by default: `.kube/config` (cluster
+  `server` is the canary URL or a `k8s.` canary host, bearer service account token),
+  `.docker/config.json` (`auths` for a `registry.` canary host, base64 `deploy:<token>`),
+  `.git-credentials` (`https://deploy:<token>@git.<token_id>.<domain>`) and `.pypirc` (an
+  `[internal]` index whose `repository` is the canary URL or a `pypi.` canary host). Using them
+  with `kubectl`, `docker`, `git` or `twine` makes a DNS or HTTP hit. `clean` covers the new
+  files, and DNS alert details keep the new tags `k8s`, `registry`, `git` and `pypi`.
+
 ## [0.1.0] - 2026-11-05
 
 First public release.
