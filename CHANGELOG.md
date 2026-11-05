@@ -19,6 +19,13 @@ All notable changes to this project are documented here. The format follows
 - `report [LOG ...]` summarizes alert logs per token (first/last seen, channels, secrets,
   encodings, sources), with `--json`; malformed lines are counted. Exits 1 when there are
   alerts, 0 when none and 2 when a log cannot be read.
+- `plant` kinds `kube`, `docker`, `git` and `pypi`, on by default: `.kube/config` (cluster
+  `server` is the canary URL or a `k8s.` canary host, bearer service account token),
+  `.docker/config.json` (`auths` for a `registry.` canary host, base64 `deploy:<token>`),
+  `.git-credentials` (`https://deploy:<token>@git.<token_id>.<domain>`) and `.pypirc` (an
+  `[internal]` index whose `repository` is the canary URL or a `pypi.` canary host). Using them
+  with `kubectl`, `docker`, `git` or `twine` makes a DNS or HTTP hit. `clean` covers the new
+  files, and DNS alert details keep the new tags `k8s`, `registry`, `git` and `pypi`.
 
 ## [0.1.0] - 2026-11-05
 

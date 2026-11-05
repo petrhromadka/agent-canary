@@ -40,7 +40,7 @@ MAX_NAME = 255  # longest DNS name on the wire; escaped non-ASCII bytes may be c
 # Left labels kept in an alert detail when they are the only label left of the token id:
 # the tags the planters put in hostnames, plus the kind names. Any other left label may be
 # (part of) an exfiltrated secret, so it is replaced by REDACTED.
-PLANT_TAGS = frozenset({"db", "ssh", "aws", "env"})
+PLANT_TAGS = frozenset({"db", "ssh", "aws", "env", "k8s", "registry", "git", "pypi"})
 # Per token id at most this many alerts per window. The first alert of a token is never
 # suppressed; suppressed lookups are dropped silently (no count is reported) and alerting
 # resumes with the next lookup after the window ends. Dedup by name runs first.
