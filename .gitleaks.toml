@@ -1,0 +1,4 @@
+title = "agent-canary gitleaks config"
+
+[extend]
+useDefault = true

@@ -1,0 +1,38 @@
+[project]
+name = "agent-canary"
+version = "0.1.0"
+description = "Canary tokens for AI coding agents: plant fake API keys and SSH keys in a workspace, then catch the agent sending them out over DNS or HTTP."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Petr Hromádka", email = "109349500+petrhromadka@users.noreply.github.com" }]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+agent-canary = "agent_canary.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "PTH"]
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S107"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+    "ty>=0.0.98",
+]
