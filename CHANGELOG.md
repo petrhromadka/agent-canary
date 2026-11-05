@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Detection of planted values and token ids that were gzip- or zlib-compressed, raw or
+  base64-encoded (`gzip -c .env | base64`); encoding labels `gzip`, `zlib`, `gzip+base64` and
+  `zlib+base64`. Decompression is capped at 16 candidate streams, 1 MiB of output each and
+  4 MiB in total per search.
+- Detection of base32 (upper- or lowercase, padded or not, wrapped), label `base32`.
+- Hex with separators is now found as `hex`: `xxd`, `hexdump -C` and `od -tx1` dumps, `\xNN`
+  escapes, `0xNN` lists (`xxd -i`) and colon- or space-separated bytes.
+- Double percent-encoding (`%252F`), reported as `url`.
+- Reversed values (`rev`), label `reversed`.
 - `listen --webhook URL` (repeatable) POSTs each alert as JSON (the log line plus `text` and
   `content` for Slack, Mattermost and Discord) from one background thread with a bounded queue.
   http(s) only, 5 s timeout, two retries, no redirects; errors name only the host.

@@ -75,8 +75,9 @@ flowchart LR
   - The HTTP listener answers every parsable request, whatever the method, with `200` and the
     body `ok` (HTTP/1.1 with `Connection: close`). It alerts when the request line, headers,
     body or percent-decoded path and query contain a token id or a planted secret, in plain form
-    or percent-, base64-, hex- or JSON-escaped. Repeated HTTP alerts are also suppressed for 60
-    seconds.
+    or in any of the encodings listed under [Limits](#limits-and-false-positives) (percent-,
+    base64-, base32-, hex- or JSON-escaped, gzip-compressed and more). Repeated HTTP alerts are
+    also suppressed for 60 seconds.
 - `scan` does the same search offline over agent transcripts or proxy logs. It exits with 1 if
   anything was found and 2 if anything could not be read.
 
@@ -280,7 +281,7 @@ The HTTP and DNS alerts from the quickstart run above, as logged:
 | `detail` | DNS name as queried, with every label other than the token id, the canary domain and a lone plant tag (`db`, `ssh`, `aws`, `env`, `k8s`, `registry`, `git`, `pypi`) before the token id replaced by `<redacted>`; `METHOD /path` (at most 200 characters); or `line N` for scan |
 | `matches[].token_id` | Token id of the planting run |
 | `matches[].kind`, `path`, `name` | Which planted secret matched; `null` when only the token id was seen |
-| `matches[].encoding` | How it appeared: `plain`, `url` (percent-encoded), `base64`, `hex`, `json` (`\/` or `\u002f`-style escapes) or `utf-16` (UTF-16LE text) |
+| `matches[].encoding` | How it appeared: `plain`, `url` (percent-encoded once or twice), `base64`, `base32`, `hex` (also grouped, `\xNN`, `0xNN` and hex dumps), `json` (`\/` or `\u002f`-style escapes), `utf-16` (UTF-16LE text), `reversed`, or `gzip`, `zlib`, `gzip+base64`, `zlib+base64` (in the text a compressed stream decompresses to) |
 
 A token-id-only match is dropped when a secret of the same token appears in the same data, which
 is why the HTTP alert above lists five secrets and not the token. The console line has control
@@ -395,18 +396,24 @@ each alert back to the run that planted that id with `agent-canary list` or your
   the agent's transcript or your proxy logs can catch that.
 - **`scan` sees only what was logged.** A transcript that omits tool output, a proxy that does
   not record bodies, or a truncated log hides a leak from it.
-- **Detected encodings.** Plain text; percent-encoding; base64 (standard and URL-safe, also
-  wrapped at 64 or 76 columns or with JSON-escaped newlines); hex; JSON escapes (`\/` and
-  `\u002f`-style, reported as `json`); and UTF-16LE text, as PowerShell 5.1 redirection writes
-  it.
+- **Detected encodings.** Plain text; percent-encoding, once or twice (`%252F`); base64
+  (standard and URL-safe, also wrapped at 64 or 76 columns or with JSON-escaped newlines);
+  base32 (upper- or lowercase, padded or not, wrapped); hex, also with separators: `xxd`,
+  `hexdump -C` and `od -tx1` dumps, `\xNN` escapes, `0xNN` lists and colon- or
+  space-separated bytes; JSON escapes (`\/` and `\u002f`-style, reported as `json`); UTF-16LE
+  text, as PowerShell 5.1 redirection writes it; the value reversed (`rev`); and gzip or zlib
+  streams, raw or base64-encoded (`gzip -c .env | base64`), whose decompressed text contains
+  the value.
+- **Decompression is bounded.** At most 16 candidate streams per search, 1 MiB of output from
+  each and 4 MiB in total. A value past those limits is missed, as is one in a compressed
+  stream wrapped in a further encoding (hex or base32 of gzip, percent-encoded base64 of gzip)
+  or one that is itself encoded inside the stream. `scan` reads large files in 8 MiB blocks; a
+  stream cut by a block boundary is searched only up to the cut.
 - **Not detected** (each reproduced in an audit):
-  - gzip-compressed data that is then base64-encoded;
-  - base32;
-  - `xxd`-style grouped hex, or `\xNN` escapes;
-  - double URL-encoding such as `%252F`;
+  - raw deflate without a gzip or zlib header, and other compression formats;
   - a secret split across streaming deltas in an LLM-API proxy log, since no single record
     holds the whole value;
-  - encryption, other compression, splitting a value across requests, and paraphrasing.
+  - encryption, splitting a value across requests, and paraphrasing.
 - **DNS needs a path to the internet.** The listener serves only `A`, `SOA` and `NS` for its
   zone, and DNS-based detection works only if the agent's resolver can reach the internet and
   follow the delegation to your listener. In an offline sandbox no DNS alert arrives.
