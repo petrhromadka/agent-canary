@@ -88,10 +88,11 @@ queries to your listener.
    Keep both hostnames out of `metrics.example.com`: the listener answers `NXDOMAIN` for
    every name under the delegated domain that carries no token id, so a nameserver or web
    host inside it would not resolve. (If your provider requires the nameserver inside the
-   subdomain, the parent then needs a glue `A` record for it, and resolvers that re-query
-   the child for that name will get `NXDOMAIN`.) The listener names itself
-   `ns1.metrics.example.com` in the `NS` and `SOA` records it serves at the apex; that name
-   is informational and does not have to resolve.
+   subdomain, use exactly `ns1.metrics.example.com` with a glue `A` record.) The listener
+   names itself `ns1.metrics.example.com` in the `NS` and `SOA` records it serves at the
+   apex and answers an `A` query for that name with `--answer-ip`, so set `--answer-ip` to
+   the listener's public address (`203.0.113.10` here) when resolvers must reach it by that
+   name.
 3. Check the delegation: `dig +trace metrics.example.com SOA` should end at `203.0.113.10`
    with `NOERROR` and the `SOA`, and `dig +trace db.anytoken.metrics.example.com` should end
    with `NXDOMAIN` plus an `SOA` in the authority section. Names without a token id raise no
