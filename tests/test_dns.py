@@ -128,3 +128,11 @@ def test_parse_query_rejects_pointer_and_long_label():
 def test_answer_ip_must_be_ipv4():
     with pytest.raises(ValueError):
         DnsCanaryServer("127.0.0.1", 0, answer_ip="::1", manifests_loader=list, on_alert=print)
+
+
+def test_secret_in_a_label_is_redacted_from_the_alert(dns):
+    ask, _, _, alerts = dns
+    value = manifest().secrets[0].value
+    assert rcode(ask(query(f"{value}.x.{CANARY_ID}.{DOMAIN}"))) == 0
+    assert alerts[0].detail == f"<redacted>.x.{CANARY_ID}.{DOMAIN}"
+    assert [m.secret.name for m in alerts[0].matches if m.secret] == ["API_KEY"]

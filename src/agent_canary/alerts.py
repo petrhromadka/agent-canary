@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Sequence
+import time
+from collections.abc import Hashable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from agent_canary.models import Alert, Channel, Match
+
+DEDUP_SECONDS = 60.0
+DEDUP_MAX_ENTRIES = 10_000
 
 _lock = threading.Lock()
 
@@ -45,3 +49,27 @@ def write_alert(alert: Alert, log_path: Path | None) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+
+
+class Dedup:
+    """Remembers recently alerted keys; thread-safe and bounded."""
+
+    def __init__(self, window: float = DEDUP_SECONDS, max_entries: int = DEDUP_MAX_ENTRIES):
+        self._window = window
+        self._max = max_entries
+        self._seen: dict[Hashable, float] = {}  # insertion order == time order
+        self._lock = threading.Lock()
+
+    def first_seen(self, key: Hashable) -> bool:
+        """True when `key` was not seen within the window (and records it now)."""
+        now = time.monotonic()
+        with self._lock:
+            while self._seen:
+                oldest_key, oldest_time = next(iter(self._seen.items()))
+                if now - oldest_time < self._window and len(self._seen) < self._max:
+                    break
+                del self._seen[oldest_key]
+            if key in self._seen:
+                return False
+            self._seen[key] = now
+            return True

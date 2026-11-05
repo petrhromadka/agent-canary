@@ -9,7 +9,7 @@ binary dumps need no decoding.
 from __future__ import annotations
 
 import base64
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from urllib.parse import unquote_to_bytes
@@ -172,6 +172,25 @@ def find_matches(data: bytes | str, manifests: Sequence[Manifest]) -> list[Match
                 found.append(Match(manifest.token_id, None, encoding))
         matches.extend(found)
     return matches
+
+
+REDACTED = "<redacted>"
+
+
+def safe_detail(candidates: Iterable[str], manifests: Sequence[Manifest], limit: int) -> str:
+    """The first candidate, cut to `limit` characters, that shows no secret value.
+
+    A candidate qualifies only when neither it nor its cut form contains a secret value
+    in any searched encoding, so a value is neither logged whole nor left half-cut by the
+    truncation. Token ids may remain: they name the canary, they are not credentials.
+    Returns REDACTED when no candidate qualifies.
+    """
+    for candidate in candidates:
+        cut = candidate[:limit]
+        texts = (candidate,) if cut == candidate else (candidate, cut)
+        if not any(m.secret for text in texts for m in find_matches(text, manifests)):
+            return cut
+    return REDACTED
 
 
 def max_pattern_len(manifests: Sequence[Manifest]) -> int:

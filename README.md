@@ -225,8 +225,8 @@ each alert back to the run that planted that id with `agent-canary list` or your
   Encryption, compression, splitting a value across requests or paraphrasing it defeats it.
 - **Agent skepticism.** A capable agent may notice that the credentials are fake or never use
   them. No alert means no detected leak, not proof of safety.
-- **Offline listeners.** Alerts are lost if a listener is down; the DNS listener's 60 s dedup also
-  hides repeated lookups of the same name.
+- **Offline listeners.** Alerts are lost if a listener is down; the listeners' 60 s dedup also
+  hides repeated lookups of the same name and repeated identical HTTP requests from one address.
 - **Scope.** Only the workspace you plant into is covered. Nothing is injected into the agent's
   environment variables or home directory.
 
@@ -240,7 +240,8 @@ each alert back to the run that planted that id with `agent-canary list` or your
   secret scanners (and are the point of the exercise). Plant into a scratch copy and run
   `clean` or delete it afterwards.
 - Treat listener input as hostile: it comes from the network. Alert output has control characters
-  escaped, request bodies are capped at 1 MiB and malformed DNS packets are dropped. Do not expose
+  escaped, HTTP headers are capped at 16 KiB and bodies at 256 KiB, at most 64 connections are
+  served at once, each for at most 10 s, and malformed DNS packets are dropped. Do not expose
   `listen` more widely than the test needs. See [SECURITY.md](SECURITY.md) to report a
   vulnerability.
 

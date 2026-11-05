@@ -12,13 +12,11 @@ import socket
 import socketserver
 import struct
 import sys
-import threading
-import time
 from collections.abc import Callable
 from typing import cast
 
 from agent_canary import alerts
-from agent_canary.detect import find_matches
+from agent_canary.detect import REDACTED, find_matches, safe_detail
 from agent_canary.models import Alert, Manifest
 
 QTYPE_A = 1
@@ -27,8 +25,7 @@ RCODE_NOERROR = 0
 RCODE_NXDOMAIN = 3
 RCODE_REFUSED = 5
 ANSWER_TTL = 60
-DEDUP_SECONDS = 60.0
-DEDUP_MAX_ENTRIES = 10_000
+MAX_NAME = 255  # longest DNS name on the wire; escaped non-ASCII bytes may be cut
 
 _HEADER = struct.Struct("!HHHHHH")
 
@@ -68,33 +65,15 @@ def parse_query(packet: bytes) -> tuple[int, str, int, int] | None:
     return txid, qname, qtype, pos + 4
 
 
+def _redacted_names(qname: str) -> list[str]:
+    """`qname`, then with ever more leftmost labels replaced by one REDACTED label."""
+    labels = qname.split(".")
+    return [qname] + [".".join((REDACTED, *labels[i:])) for i in range(1, len(labels))]
+
+
 def _under_domain(qname: str, domain: str) -> bool:
     domain = domain.lower().rstrip(".")
     return bool(domain) and (qname == domain or qname.endswith("." + domain))
-
-
-class _Dedup:
-    """Remembers recently alerted names; thread-safe and bounded."""
-
-    def __init__(self, window: float = DEDUP_SECONDS, max_entries: int = DEDUP_MAX_ENTRIES):
-        self._window = window
-        self._max = max_entries
-        self._seen: dict[str, float] = {}  # insertion order == time order
-        self._lock = threading.Lock()
-
-    def first_seen(self, key: str) -> bool:
-        """True when `key` was not seen within the window (and records it now)."""
-        now = time.monotonic()
-        with self._lock:
-            while self._seen:
-                oldest_key, oldest_time = next(iter(self._seen.items()))
-                if now - oldest_time < self._window and len(self._seen) < self._max:
-                    break
-                del self._seen[oldest_key]
-            if key in self._seen:
-                return False
-            self._seen[key] = now
-            return True
 
 
 class _DnsHandler(socketserver.BaseRequestHandler):
@@ -126,11 +105,14 @@ class _DnsHandler(socketserver.BaseRequestHandler):
         header = _HEADER.pack(txid, resp_flags, 1, 1 if answers else 0, 0, 0)
         response = header + packet[_HEADER.size : question_end] + answers
         # Alert before answering, so a client that got the answer can rely on the alert existing.
+        # Dedup by name only: lookups reach us through recursive resolvers, so retries of one
+        # leak arrive from varying resolver addresses and the source says little about the leaker.
         try:
             if matches and server.dedup.first_seen(lowered):
                 ip, port = self.client_address[:2]
                 source = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
-                server.on_alert(alerts.make_alert("dns", source, qname, matches))
+                detail = safe_detail(_redacted_names(qname), manifests, limit=MAX_NAME)
+                server.on_alert(alerts.make_alert("dns", source, detail, matches))
         finally:
             sock.sendto(response, self.client_address)
 
@@ -150,7 +132,7 @@ class DnsCanaryServer(socketserver.ThreadingUDPServer):
         self.answer_ip = ipaddress.IPv4Address(answer_ip).packed  # ValueError if invalid
         self.manifests_loader = manifests_loader
         self.on_alert = on_alert
-        self.dedup = _Dedup()
+        self.dedup = alerts.Dedup()
         self.address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
         super().__init__((host, port), _DnsHandler)
 
