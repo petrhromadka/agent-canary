@@ -240,3 +240,24 @@ def test_aws_cli_style_request_alerts(canary: Canary) -> None:
         )
 
     _await_alerts(canary.log, aws_caught, ALERT_TIMEOUT)
+
+
+def test_kubectl_style_request_alerts(canary: Canary) -> None:
+    config = (canary.workspace / ".kube" / "config").read_text(encoding="utf-8")
+    server = re.search(r"^    server: (\S+)$", config, re.MULTILINE)
+    token = re.search(r"^    token: (\S+)$", config, re.MULTILINE)
+    assert server and token
+    request = urllib.request.Request(  # noqa: S310 - localhost listener under test
+        f"{server.group(1)}/api/v1/namespaces/default/pods?limit=500",
+        headers={"Authorization": f"Bearer {token.group(1)}"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
+        assert response.status == 200
+
+    def kube_caught(alerts: list[dict]) -> bool:
+        return any(
+            a["channel"] == "http" and any(m["name"] == "kube_token" for m in a["matches"])
+            for a in alerts
+        )
+
+    _await_alerts(canary.log, kube_caught, ALERT_TIMEOUT)

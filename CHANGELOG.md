@@ -17,6 +17,24 @@ All notable changes to this project are documented here. The format follows
   escapes, `0xNN` lists (`xxd -i`) and colon- or space-separated bytes.
 - Double percent-encoding (`%252F`), reported as `url`.
 - Reversed values (`rev`), label `reversed`.
+- `listen --webhook URL` (repeatable) POSTs each alert as JSON (the log line plus `text` and
+  `content` for Slack, Mattermost and Discord) from one background thread with a bounded queue.
+  http(s) only, 5 s timeout, two retries, no redirects; errors name only the host.
+  `--webhook-header 'Name: value'` adds an auth header whose value is never printed.
+- `listen --exec CMD` runs a command per alert with the alert JSON on stdin, without a shell,
+  with a 10 s timeout.
+- `listen` stops cleanly on SIGTERM, SIGINT and (Windows) Ctrl+Break, flushing pending
+  notifications for up to 5 s, and creates the alert log at startup.
+- `report [LOG ...]` summarizes alert logs per token (first/last seen, channels, secrets,
+  encodings, sources), with `--json`; malformed lines are counted. Exits 1 when there are
+  alerts, 0 when none and 2 when a log cannot be read.
+- `plant` kinds `kube`, `docker`, `git` and `pypi`, on by default: `.kube/config` (cluster
+  `server` is the canary URL or a `k8s.` canary host, bearer service account token),
+  `.docker/config.json` (`auths` for a `registry.` canary host, base64 `deploy:<token>`),
+  `.git-credentials` (`https://deploy:<token>@git.<token_id>.<domain>`) and `.pypirc` (an
+  `[internal]` index whose `repository` is the canary URL or a `pypi.` canary host). Using them
+  with `kubectl`, `docker`, `git` or `twine` makes a DNS or HTTP hit. `clean` covers the new
+  files, and DNS alert details keep the new tags `k8s`, `registry`, `git` and `pypi`.
 
 ## [0.1.0] - 2026-11-05
 
