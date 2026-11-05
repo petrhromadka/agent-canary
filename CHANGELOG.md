@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Detection of planted values and token ids that were gzip- or zlib-compressed, raw or
+  base64-encoded (`gzip -c .env | base64`); encoding labels `gzip`, `zlib`, `gzip+base64` and
+  `zlib+base64`. Decompression is capped at 16 candidate streams, 1 MiB of output each and
+  4 MiB in total per search.
+- Detection of base32 (upper- or lowercase, padded or not, wrapped), label `base32`.
+- Hex with separators is now found as `hex`: `xxd`, `hexdump -C` and `od -tx1` dumps, `\xNN`
+  escapes, `0xNN` lists (`xxd -i`) and colon- or space-separated bytes.
+- Double percent-encoding (`%252F`), reported as `url`.
+- Reversed values (`rev`), label `reversed`.
+
 ## [0.1.0] - 2026-11-05
 
 First public release.

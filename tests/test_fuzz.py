@@ -6,11 +6,13 @@ are built at runtime so no secret-shaped literal sits in the source.
 
 import base64
 import contextlib
+import gzip
 import json
 import random
 import re
 import string
 import struct
+import zlib
 from pathlib import Path
 from urllib.parse import quote
 
@@ -177,10 +179,33 @@ def wrap76(encoded: bytes) -> bytes:
     return b"\n".join(encoded[i : i + 76] for i in range(0, len(encoded), 76))
 
 
+def xxd(data: bytes) -> bytes:
+    """`data` as `xxd` dumps it: offset, eight 2-byte groups, ASCII column."""
+    lines = []
+    for at in range(0, len(data), 16):
+        row = data[at : at + 16]
+        groups = " ".join(row[i : i + 2].hex() for i in range(0, len(row), 2))
+        text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+        lines.append(f"{at:08x}: {groups:<39}  {text}")
+    return "\n".join(lines).encode() + b"\n"
+
+
 def random_haystack(rng: random.Random, size: int) -> bytes:
-    kind = rng.choice(["bytes", "text", "base64", "wrapped", "hex", "utf-16"])
+    kind = rng.choice(
+        ["bytes", "text", "base64", "wrapped", "hex", "utf-16", "base32", "xxd", "gzip"]
+    )
     if kind == "bytes":
         return rng.randbytes(size)
+    if kind == "base32":
+        return wrap76(base64.b32encode(rng.randbytes(size * 5 // 8)))
+    if kind == "xxd":
+        return xxd(rng.randbytes(size // 4))
+    if kind == "gzip":
+        text = "".join(rng.choices(TEXT_ALPHABET + string.punctuation, k=size))
+        packed = (
+            gzip.compress(text.encode()) if rng.random() < 0.5 else zlib.compress(text.encode())
+        )
+        return rng.choice([packed, wrap76(base64.b64encode(packed))])
     if kind == "text":
         return "".join(rng.choices(TEXT_ALPHABET + string.punctuation, k=size)).encode()
     if kind == "wrapped":
@@ -238,6 +263,11 @@ def base64_forms(rng: random.Random, value: str) -> list[bytes]:
         base64.urlsafe_b64encode(blob).rstrip(b"="),
         quote(standard.decode(), safe="").encode(),
         wrap76(standard),
+        wrap76(base64.b32encode(blob)),
+        base64.b32encode(blob).lower().rstrip(b"="),
+        gzip.compress(blob),
+        b" " + wrap76(base64.b64encode(gzip.compress(blob))),
+        b" " + base64.b64encode(zlib.compress(blob)),
     ]
 
 
@@ -261,6 +291,13 @@ def test_planted_value_found_in_plain_percent_and_hex_forms():
             raw.hex().encode(),
             raw.hex().upper().encode(),
             value.encode("utf-16-le"),
+            quote(quote(value, safe=""), safe="").encode(),
+            value[::-1].encode(),
+            "".join(f"\\x{b:02x}" for b in raw).encode(),
+            ", ".join(f"0x{b:02X}" for b in raw).encode(),
+            ":".join(f"{b:02x}" for b in raw).encode(),
+            b"\n"
+            + xxd(rng.randbytes(rng.randint(0, 40)) + raw + rng.randbytes(rng.randint(0, 40))),
         ]
         for form in forms:
             assert_found(plant_in_text(rng, form), manifests, target, value)

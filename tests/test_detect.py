@@ -1,6 +1,10 @@
 import base64
+import gzip
 import json
 import random
+import time
+import zlib
+from urllib.parse import quote
 
 import pytest
 
@@ -106,6 +110,98 @@ def test_max_pattern_len_covers_escaped_wrapped_base64():
     form = b"\\u000d\\u000a".join(escaped)
     assert encodings(form, m) == [(True, "base64")]
     assert len(form) <= max_pattern_len([m])
+
+
+def hexdump_c(data: bytes) -> bytes:
+    """`data` as `hexdump -C` dumps it."""
+    lines = []
+    for at in range(0, len(data), 16):
+        row = data[at : at + 16]
+        cols = " ".join(f"{b:02x}" for b in row[:8]) + "  " + " ".join(f"{b:02x}" for b in row[8:])
+        text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+        lines.append(f"{at:08x}  {cols:<48}  |{text}|")
+    return "\n".join(lines).encode() + b"\n"
+
+
+def xxd(data: bytes) -> bytes:
+    """`data` as `xxd` dumps it."""
+    lines = []
+    for at in range(0, len(data), 16):
+        row = data[at : at + 16]
+        groups = " ".join(row[i : i + 2].hex() for i in range(0, len(row), 2))
+        text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+        lines.append(f"{at:08x}: {groups:<39}  {text}")
+    return "\n".join(lines).encode() + b"\n"
+
+
+ENV = b"FOO=bar\nAPI_KEY=" + VALUE.encode() + b"\nDEBUG=1\n"
+BACKSLASH = chr(92)
+
+
+@pytest.mark.parametrize(
+    ("data", "encoding"),
+    [
+        (gzip.compress(ENV), "gzip"),
+        (gzip.compress(ENV)[:-9], "gzip"),  # truncated stream: output before the cut counts
+        (b"body=" + zlib.compress(ENV), "zlib"),
+        (b"echo " + wrap(base64.b64encode(gzip.compress(ENV * 4)), 76), "gzip+base64"),
+        (json.dumps(base64.urlsafe_b64encode(zlib.compress(ENV)).decode()), "zlib+base64"),
+        (wrap(base64.b32encode(ENV), 76), "base32"),
+        (base64.b32encode(b"xy" + ENV).lower().rstrip(b"="), "base32"),
+        (xxd(ENV), "hex"),
+        (hexdump_c(ENV), "hex"),
+        (
+            b"od:\n"
+            + b"\n".join(
+                f"{i:07o} ".encode() + b" ".join(b"%02x" % c for c in ENV[i : i + 16])
+                for i in range(0, len(ENV), 16)
+            ),
+            "hex",
+        ),
+        ("".join(f"{BACKSLASH}x{b:02x}" for b in ENV), "hex"),
+        (", ".join(f"0x{b:02X}" for b in ENV), "hex"),
+        (":".join(f"{b:02x}" for b in ENV), "hex"),
+        ("q=" + quote(quote(VALUE, safe=""), safe=""), "url"),
+        (ENV.decode()[::-1], "reversed"),
+    ],
+)
+def test_more_encodings(data, encoding):
+    assert encodings(data) == [(True, encoding)]
+
+
+def test_token_id_in_new_encodings():
+    assert encodings(base64.b32encode(b"id=" + CANARY.encode())) == [(False, "base32")]
+    assert encodings(f"x {CANARY[::-1]} y") == [(False, "reversed")]
+    assert encodings(f"x{CANARY[::-1]}") == []
+    assert encodings(quote(quote(f"/t/{CANARY}/env", safe=""), safe="")) == [(False, "url")]
+    assert encodings(gzip.compress(f"GET /t/{CANARY}/env".encode())) == [(False, "gzip")]
+
+
+def test_decompression_is_capped():
+    bomb = gzip.compress(bytes(64 * 1024 * 1024) + ENV)  # the value sits past the output cap
+    started = time.perf_counter()
+    assert encodings(bomb * 20) == []
+    assert time.perf_counter() - started < 5
+
+
+def test_max_pattern_len_covers_new_forms():
+    m = manifest()
+    raw = VALUE.encode()
+    chars = base64.b32encode(raw)
+    escaped = [b"".join(b"\\u%04x" % c for c in line) for line in wrap(chars, MIN_WRAP).split()]
+    forms = {
+        "base32": b"\\u000d\\u000a".join(escaped),
+        "hex": b", ".join(b"0x%02x" % b for b in raw) + b",",
+        "url": quote(quote(VALUE, safe=""), safe="").encode(),
+    }
+    for encoding, form in forms.items():
+        assert encodings(form, m) == [(True, encoding)], encoding
+        assert len(form) <= max_pattern_len([m]), encoding
+    # A dump needs whole lines: from the line break before the one the value starts at the
+    # end of, to the end of the line it ends in.
+    for dump in (xxd(b"x" * 15 + raw + b"x" * 15), hexdump_c(b"x" * 15 + raw + b"x" * 15)):
+        assert encodings(dump, m) == [(True, "hex")]
+        assert len(dump) + 1 <= max_pattern_len([m])
 
 
 def test_no_false_positive_on_random_megabyte():
