@@ -16,11 +16,17 @@ First public release.
   overwritten, and the state directory must be outside the workspace.
 - `listen`: a DNS (UDP) listener for a delegated canary domain and an HTTP listener for canary
   URLs and requests carrying planted secrets. Alerts print to the console and append to a JSON
-  Lines log.
-- `scan`: offline search of files, directories or stdin (agent transcripts, proxy logs). Exits
-  with 1 when a canary is found.
+  Lines log. Both listeners suppress repeated alerts for 60 seconds. The HTTP listener reads at
+  most 256 KiB of a body and 16 KiB of headers and serves at most 64 connections at once.
+- Detection of plain, percent-encoded, base64 (standard and URL-safe) and hex copies of each
+  planted value and token id.
+- `scan`: offline search of files, directories or stdin (agent transcripts, proxy logs). The
+  planted decoy files are skipped. Exits with 1 when a canary is found, 0 when none is and 2 on
+  an error.
 - `list` and `clean`: show planted canaries and remove the files a run created, only when they
-  are unchanged.
-- Alerts name the matched secret (file and key) and never contain its value.
+  are unchanged. `clean` deletes only the fixed set of planted file names and refuses symlinked
+  parent directories.
+- Alerts name the matched secret (file and key) and never contain its value, including in the
+  `detail` field.
 
 [0.1.0]: https://github.com/petrhromadka/agent-canary/releases/tag/v0.1.0
