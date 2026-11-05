@@ -24,12 +24,12 @@ into an agent's workspace:
   reaches your listener and becomes an alert. The zone apex answers `NOERROR` with `SOA` and
   `NS` records. Other names under a planted `--dns-domain` get `NXDOMAIN` (or an empty
   `NODATA` answer), carrying an `SOA` with a negative TTL of 60 s. Names outside every
-  planted domain, and queries of a class other than `IN`, get `REFUSED`, so the listener is
+  planted domain, and queries of a class other than `IN` or `ANY`, get `REFUSED`, so the listener is
   never an open resolver; an opcode other than `QUERY` gets `NOTIMP`. A token id seen
   outside every canary domain still raises an alert but is answered `REFUSED`. Secrets are
   matched case-insensitively, because resolvers randomize the case of names, and a secret
-  split across labels is detected. The `detail` of a DNS alert never shows the labels left
-  of the token id.
+  split across labels is detected. The `detail` of a DNS alert keeps only the token id, the canary
+  domain and a lone plant tag such as `db`; every other label becomes `<redacted>`.
 - **HTTP:** answers every parsable request with `200 ok` and raises an alert for any
   request whose request line, path or query carries a token id (as in `/t/<token_id>/<tag>`)
   or whose headers or body carry a planted secret, including base64-, percent- and
@@ -261,7 +261,8 @@ that point at the listener's address on the container network:
 - Plant with `--dns-domain metrics.internal --http-url http://<listener-ip>:8080` and start
   the agent container with `--dns <listener-ip>` (Docker's `--dns` takes an IP address,
   not a hostname). Every name the agent looks up then reaches the listener: canary names
-  get an answer and an alert, everything else `REFUSED`.
+  get an answer and an alert, other names under the canary domain `NXDOMAIN`, everything
+  else `REFUSED`.
 
 Any attempt to reach a planted host or URL then has nowhere to go but your listener, and
 anything the agent tries to send to the real internet is simply blocked, which is itself a

@@ -22,10 +22,10 @@ First public release.
 - DNS listener behaviour: it serves only `A`, `SOA` and `NS`. The zone apex answers `NOERROR`
   with `SOA` and `NS` (`ns1.<domain>`, `hostmaster.<domain>`); `NXDOMAIN` and `NODATA` answers
   carry an `SOA` (negative TTL 60) so resolvers do not drop the zone. An opcode other than
-  `QUERY` gets `NOTIMP`, a class other than `IN` gets `REFUSED`. A token id seen outside every
+  `QUERY` gets `NOTIMP`, a class other than `IN` or `ANY` gets `REFUSED`. A token id seen outside every
   canary domain still alerts but is answered `REFUSED`. Secrets are matched case-insensitively
-  (resolvers randomize case), a secret split across labels is detected, and labels left of the
-  token id are always redacted in alert details. Alerts are rate-limited per token (about 30
+  (resolvers randomize case), a secret split across labels is detected, and every label other than the
+  token id, the canary domain and a lone plant tag is redacted in alert details. Alerts are rate-limited per token (about 30
   per minute). `--dns [::]:PORT` is dual-stack.
 - Detection of plain, percent-encoded, base64 (standard and URL-safe) and hex copies of each
   planted value and token id. Also found: base64 wrapped at 64 or 76 columns or with
@@ -44,8 +44,8 @@ First public release.
   `scan`, which sees only what was logged; DNS detection needs the agent's resolver to reach
   the internet.
 - `list` and `clean`: show planted canaries and remove the files a run created, only when they
-  are unchanged. `clean` deletes only the fixed set of planted file names and refuses symlinked
-  parent directories.
+  are unchanged. `clean` deletes only the fixed set of planted file names and keeps any file it would
+  reach through a symlink or junction.
 - Alerts name the matched secret (file and key) and never contain its value, including in the
   `detail` field.
 

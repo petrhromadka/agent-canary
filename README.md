@@ -66,11 +66,11 @@ flowchart LR
     with `SOA` and `NS` records (`ns1.<domain>`, `hostmaster.<domain>`). Other names under a
     planted `--dns-domain` get `NXDOMAIN` or an empty `NODATA` answer, both carrying an `SOA`
     (negative TTL 60) so resolvers do not drop the zone. Queries with an opcode other than
-    `QUERY` get `NOTIMP`, and queries of a class other than `IN` get `REFUSED`, as does
+    `QUERY` get `NOTIMP`, and queries of a class other than `IN` or `ANY` get `REFUSED`, as does
     everything outside a planted domain, so it is never an open resolver. A token id seen
     outside every canary domain still raises an alert but is answered `REFUSED`. Secrets are
     matched case-insensitively (resolvers randomize case), and a secret split across several
-    labels is detected. Repeated lookups of the same name within 60 seconds raise one alert,
+    labels (on either side of the token id) is detected. Repeated lookups of the same name within 60 seconds raise one alert,
     and each token is limited to about 30 DNS alerts per minute.
   - The HTTP listener answers every parsable request, whatever the method, with `200` and the
     body `ok` (HTTP/1.1 with `Connection: close`). It alerts when the request line, headers,
@@ -196,7 +196,7 @@ $ echo $?
 1
 $ agent-canary scan ~/project
 no canaries found
-skipped: 3 planted decoys, 1 dir (.git)
+skipped: 7 planted decoys, 1 dir (.git)
 $ echo $?
 0
 ```
@@ -215,7 +215,7 @@ cleaned ugwaxvh7nsgs
 `clean` deletes only the fixed set of files `plant` creates, only those this manifest recorded, and
 only if their content is unchanged. A modified file is kept and a missing one skipped, each with
 a warning.
-It refuses to follow a symlinked parent directory, removes `.aws` and `.ssh` if they end up empty,
+It keeps any file it would reach through a symlink or junction, removes `.aws` and `.ssh` if they end up empty,
 and then deletes the manifest.
 
 ## What gets planted
@@ -256,10 +256,10 @@ The HTTP and DNS alerts from the quickstart run above, as logged:
 | `time` | UTC timestamp, ISO 8601, in seconds |
 | `channel` | `dns`, `http` or `scan` |
 | `source` | `ip:port` of the client (`[ip]:port` for IPv6); for `scan`, the file path or `<stdin>` |
-| `detail` | DNS name as queried, with the labels left of the token id always redacted; `METHOD /path` (at most 200 characters); or `line N` for scan |
+| `detail` | DNS name as queried, with every label other than the token id, the canary domain and a lone plant tag (`db`, `ssh`, `aws`, `env`) before the token id replaced by `<redacted>`; `METHOD /path` (at most 200 characters); or `line N` for scan |
 | `matches[].token_id` | Token id of the planting run |
 | `matches[].kind`, `path`, `name` | Which planted secret matched; `null` when only the token id was seen |
-| `matches[].encoding` | How it appeared: `plain`, `url` (percent-encoded), `base64`, `hex` or `json` (`\/` or `\u002f`-style escapes) |
+| `matches[].encoding` | How it appeared: `plain`, `url` (percent-encoded), `base64`, `hex`, `json` (`\/` or `\u002f`-style escapes) or `utf-16` (UTF-16LE text) |
 
 A token-id-only match is dropped when a secret of the same token appears in the same data, which
 is why the HTTP alert above lists five secrets and not the token. The console line has control
