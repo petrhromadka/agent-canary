@@ -1,9 +1,10 @@
 import base64
+import json
 import random
 
 import pytest
 
-from agent_canary.detect import find_matches
+from agent_canary.detect import MIN_WRAP, find_matches, max_pattern_len
 from agent_canary.models import Manifest, Secret
 
 CANARY = "abcdefgh2345"
@@ -55,6 +56,56 @@ def test_token_id_whole_token_and_encoded():
     assert encodings(f"{CANARY}9") == []
     assert encodings(f"id={base64.b64encode(CANARY.encode()).decode()}") == [(False, "base64")]
     assert encodings(f"{CANARY} and {VALUE}") == [(True, "plain")]
+
+
+def wrap(text: bytes, width: int, sep: bytes = b"\n") -> bytes:
+    return sep.join(text[i : i + width] for i in range(0, len(text), width))
+
+
+@pytest.mark.parametrize(("width", "as_json"), [(76, False), (64, False), (76, True)])
+def test_wrapped_base64_found_wherever_the_line_break_falls(width, as_json):
+    for offset in range(width):
+        blob = b"x" * offset + b"API_KEY=" + VALUE.encode() + b"\n"
+        wrapped = wrap(base64.b64encode(blob), width, b"\r\n" if as_json else b"\n")
+        data = json.dumps({"out": wrapped.decode()}) if as_json else wrapped
+        assert encodings(data) == [(True, "base64")], offset
+
+
+def test_base64_text_value_found_rewrapped_or_stripped():
+    value = base64.b64encode(bytes(range(7, 250, 5))).decode()[:70]  # like one ssh key line
+    body = ("A" * 33 + value + "B" * 40).encode()
+    m = manifest(value)
+    for data in (wrap(body, 64), wrap(body, 76, b"\r\n"), json.dumps(wrap(body, 64).decode())):
+        assert encodings(data, m) == [(True, "plain")]
+
+
+def test_utf16le_value_and_token():
+    assert encodings(f"API_KEY={VALUE}\r\n".encode("utf-16-le")) == [(True, "utf-16")]
+    assert encodings(f"GET /t/{CANARY.upper()}/env".encode("utf-16-le")) == [(False, "utf-16")]
+    assert encodings(f"x{CANARY}".encode("utf-16-le")) == []
+
+
+def test_json_escaped_slash_and_unicode():
+    value = "test value/1=abc+def"
+    m = manifest(value)
+    backslash = chr(92)
+    assert encodings(value.replace("/", backslash + "/"), m) == [(True, "json")]
+    escaped = value.replace("+", backslash + "u002b").replace("=", backslash + "u003D")
+    assert encodings(escaped, m) == [(True, "json")]
+
+
+def test_token_id_after_json_escape_is_a_whole_token():
+    assert encodings(json.dumps(f"id:\n{CANARY}\tok")) == [(False, "plain")]
+    assert encodings(json.dumps(f"x{CANARY}")) == []
+
+
+def test_max_pattern_len_covers_escaped_wrapped_base64():
+    m = manifest()
+    chars = base64.b64encode(VALUE.encode()).rstrip(b"=")
+    escaped = [b"".join(b"\\u%04x" % c for c in line) for line in wrap(chars, MIN_WRAP).split()]
+    form = b"\\u000d\\u000a".join(escaped)
+    assert encodings(form, m) == [(True, "base64")]
+    assert len(form) <= max_pattern_len([m])
 
 
 def test_no_false_positive_on_random_megabyte():

@@ -1,14 +1,16 @@
 """Find planted canaries (token ids and secret values) in arbitrary observed data.
 
 Besides the plain value, each canary is searched for as it would look after the common
-encodings a leaking agent applies: percent-encoding (form or URL), base64 (standard and
-URL-safe, alone or inside a larger encoded blob) and hex. All searching is on bytes, so
-binary dumps need no decoding.
+encodings a leaking agent applies: percent-encoding (form or URL), JSON string escapes
+(`\\/` and `\\u00XX`), base64 (standard and URL-safe, alone or inside a larger encoded blob,
+wrapped into lines or not), hex and UTF-16LE. All searching is on bytes, so binary dumps
+need no decoding.
 """
 
 from __future__ import annotations
 
 import base64
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
@@ -20,7 +22,15 @@ from agent_canary.models import Manifest, Match
 # random base64 data; 12 characters carry 72 bits.
 MIN_BASE64_LEN = 12
 
+# Narrowest line width assumed for wrapped base64 when bounding pattern spans (PEM wraps at
+# 64, coreutils and MIME at 76). Narrower wrapping is still found, but not across chunks.
+MIN_WRAP = 32
+
 _TOKEN_BYTES = frozenset(b"abcdefghijklmnopqrstuvwxyz0123456789")
+_LETTERS = frozenset(b"abcdefghijklmnopqrstuvwxyz")
+_BASE64_CHARS = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+_URLSAFE_TO_STANDARD = bytes.maketrans(b"-_", b"+/")
+_JSON_ASCII_ESCAPE = re.compile(rb"\\u00([0-7][0-9a-fA-F])")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +39,8 @@ class _Patterns:
     hex: bytes  # lowercase, searched in the lowercased haystack so upper and lower both match
     base64: tuple[bytes, ...]  # standard-alphabet fragments, one per alignment
     base64_quoted: tuple[bytes, ...]  # the fragments that change when percent-encoded
+    base64_text: bool  # the value is itself base64 text, so it may appear re-wrapped
+    utf16: bytes  # UTF-16LE of the value
 
 
 def _base64_fragments(raw: bytes) -> tuple[bytes, ...]:
@@ -58,6 +70,8 @@ def _patterns(value: str) -> _Patterns:
         hex=raw.hex().encode("ascii"),
         base64=fragments,
         base64_quoted=tuple(f for f in fragments if b"+" in f or b"/" in f),
+        base64_text=len(raw) >= MIN_BASE64_LEN and all(b in _BASE64_CHARS for b in raw),
+        utf16=value.encode("utf-16-le"),
     )
 
 
@@ -72,9 +86,32 @@ class _Haystack:
         return self.data.lower()
 
     @cached_property
+    def json(self) -> bytes | None:
+        """Data with the JSON escapes `\\/` and `\\u00XX` undone, or None when there are none."""
+        if b"\\" not in self.data:
+            return None
+        decoded = self.data.replace(b"\\/", b"/")
+        if b"\\u00" in decoded:
+            decoded = _JSON_ASCII_ESCAPE.sub(lambda m: bytes([int(m[1], 16)]), decoded)
+        return None if decoded == self.data else decoded
+
+    @cached_property
+    def unwrapped(self) -> bytes:
+        """JSON-unescaped data without line breaks: CR, LF and the escapes `\\r`, `\\n`."""
+        data = self.data if self.json is None else self.json
+        if b"\n" in data or b"\r" in data:
+            data = data.replace(b"\n", b"").replace(b"\r", b"")
+        if b"\\" in data:
+            data = data.replace(b"\\n", b"").replace(b"\\r", b"")
+        return data
+
+    @cached_property
     def base64(self) -> bytes:
-        """Data with the URL-safe base64 alphabet mapped to the standard one."""
-        return self.data.replace(b"-", b"+").replace(b"_", b"/")
+        """The unwrapped data with the URL-safe base64 alphabet mapped to the standard one."""
+        data = self.unwrapped
+        if b"-" in data or b"_" in data:
+            data = data.translate(_URLSAFE_TO_STANDARD)
+        return data
 
     @cached_property
     def unquoted(self) -> bytes | None:
@@ -115,22 +152,36 @@ def _find_value(value: str, hay: _Haystack) -> str | None:
         return "plain"
     if hay.unquoted is not None and patterns.plain in hay.unquoted:
         return "url"
+    if hay.json is not None and patterns.plain in hay.json:
+        return "json"
+    if patterns.base64_text and hay.unwrapped is not hay.data and patterns.plain in hay.unwrapped:
+        return "plain"
     if _has_base64(patterns, hay):
         return "base64"
     if patterns.hex in hay.lower:
         return "hex"
+    if patterns.utf16 in hay.data:
+        return "utf-16"
     return None
 
 
-def _has_word(data: bytes, word: bytes) -> bool:
-    """`word` occurs in lowercased `data` not inside a longer [a-z0-9] run."""
-    end = len(data)
+def _has_word(data: bytes, word: bytes, width: int = 1) -> bool:
+    """`word` occurs in lowercased `data` not inside a longer [a-z0-9] run.
+
+    `width` is the bytes per character: 1 for ASCII, 2 for UTF-16LE. A backslash and a
+    letter right before `word` are a string escape such as `\\n`, which ends the run.
+    """
+
+    def char(i: int) -> int | None:
+        if i < 0 or i + width > len(data) or any(data[i + 1 : i + width]):
+            return None
+        return data[i]
+
     pos = data.find(word)
     while pos >= 0:
-        after = pos + len(word)
-        if (pos == 0 or data[pos - 1] not in _TOKEN_BYTES) and (
-            after == end or data[after] not in _TOKEN_BYTES
-        ):
+        before = char(pos - width)
+        escaped = before in _LETTERS and char(pos - 2 * width) == ord("\\")
+        if (before not in _TOKEN_BYTES or escaped) and char(pos + len(word)) not in _TOKEN_BYTES:
             return True
         pos = data.find(word, pos + 1)
     return False
@@ -147,14 +198,17 @@ def _find_token(token_id: str, hay: _Haystack) -> str | None:
         return "base64"
     if patterns.hex in hay.lower:
         return "hex"
+    if _has_word(hay.lower, patterns.utf16, width=2):
+        return "utf-16"
     return None
 
 
 def find_matches(data: bytes | str, manifests: Sequence[Manifest]) -> list[Match]:
     """Every canary that appears in `data`, at most one Match per (token, secret).
 
-    Match.encoding is "plain" when the value appears unencoded, else "url", "base64" or
-    "hex". A token id alone (seen in a hostname or URL) yields a Match with secret=None;
+    Match.encoding is "plain" when the value appears unencoded (a value that is itself
+    base64 text also when re-wrapped into lines), else "url", "json", "base64", "hex" or
+    "utf-16". A token id alone (seen in a hostname or URL) yields a Match with secret=None;
     it is dropped when a secret of the same token was also found in the same data.
     """
     raw = data.encode("utf-8", errors="replace") if isinstance(data, str) else data
@@ -207,7 +261,9 @@ def max_pattern_len(manifests: Sequence[Manifest]) -> int:
         ),
         default=0,
     )
-    # The longest form is base64 (4 chars per 3 bytes) with every character percent-encoded
-    # (3 bytes each): 4 bytes per value byte. +2 for the characters around a token id that
-    # decide whether it is a whole token.
-    return 4 * longest + 2
+    # The longest form is base64 (4 chars per 3 bytes) with every character JSON-escaped as
+    # `\u00XX` (6 bytes) and an escaped line break `\u000d\u000a` (12 bytes) after every
+    # MIN_WRAP characters. +6 for the UTF-16LE characters around a token id that decide
+    # whether it is a whole token (an escape before it, one character after it).
+    chars = -(-4 * longest // 3)
+    return 6 * chars + 12 * (chars // MIN_WRAP + 1) + 6
