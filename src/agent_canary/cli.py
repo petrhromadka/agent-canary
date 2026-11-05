@@ -142,6 +142,10 @@ def _cmd_scan(args: argparse.Namespace, state_dir: Path) -> int:
     if not manifests:
         print("error: no planted canaries in the state dir", file=sys.stderr)
         return 2
+    missing = [p for p in args.paths if p != "-" and not Path(p).exists()]
+    if missing:
+        print(f"error: no such file or directory: {', '.join(missing)}", file=sys.stderr)
+        return 2
     found = scan_paths(args.paths, manifests)
     for alert in found:
         alerts.write_alert(alert, args.log)
