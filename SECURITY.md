@@ -2,11 +2,14 @@
 
 agent-canary is a defensive detection tool. `plant` writes **fake** credentials that grant access
 to nothing; `listen` only receives traffic and records which canary it carried; `scan` only
-reads files. Nothing is sent anywhere by the tool itself.
+reads files. Nothing is sent anywhere unless the user configures `listen --webhook` or
+`--exec`.
 
 ## Design rules
 
 - Alert logs and console output name the secret (file and key), never its value.
+- Webhook and `--exec` targets are user-configured; their payload is the alert log line and
+  never contains a secret value.
 - Manifests live outside the workspace (`$AGENT_CANARY_HOME`, default `~/.agent-canary`) so the
   agent under test cannot read which files are decoys. `plant` refuses a state dir inside the
   workspace. This only helps against an agent confined to the workspace: an agent running as the
