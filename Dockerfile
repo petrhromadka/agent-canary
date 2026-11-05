@@ -15,7 +15,7 @@ FROM python:3.14.10-slim-trixie
 
 COPY --from=build /opt/venv /opt/venv
 RUN adduser --disabled-password --gecos "" --uid 10001 canary \
-    && mkdir -p /data/state \
+    && mkdir -p -m 700 /data/state \
     && chown -R canary /data
 
 ENV PATH="/opt/venv/bin:$PATH" \

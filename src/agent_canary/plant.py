@@ -169,7 +169,7 @@ class _Planter:
         for item in self.pending:
             path = self.workspace / item.rel
             if not path.parent.is_dir():
-                path.parent.mkdir()
+                path.parent.mkdir(mode=0o700)  # like a real ~/.ssh; umask can only narrow it
                 self.created_dirs.append(path.parent)
             if problem := _blocked(self.workspace, item.rel):  # changed since check_all
                 raise FileExistsError(problem)
