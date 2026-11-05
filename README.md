@@ -91,9 +91,9 @@ plant only some groups; the kinds are `aws`, `env`, `ssh` and `npm`. Manifests g
 **2. Listen** for hits. This terminal shows alerts and appends them to `alerts.jsonl`:
 
 ```console
-$ agent-canary listen --http 127.0.0.1:8080 --dns 127.0.0.1:5353 --log alerts.jsonl
+$ agent-canary listen --http 127.0.0.1:8080 --dns 127.0.0.1:5300 --log alerts.jsonl
 listening http on 127.0.0.1:8080
-listening dns on 127.0.0.1:5353
+listening dns on 127.0.0.1:5300
 alerts -> alerts.jsonl
 ```
 
@@ -105,7 +105,7 @@ starts on `127.0.0.1:8080`.
 prompt-injected agent:
 
 ```console
-$ python examples/leaky_agent.py --workspace ~/project --url http://127.0.0.1:8080 --dns 127.0.0.1:5353
+$ python examples/leaky_agent.py --workspace ~/project --url http://127.0.0.1:8080 --dns 127.0.0.1:5300
 ```
 
 **4. See the alert.** The listener terminal prints one line per hit. This line comes from a real

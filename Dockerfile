@@ -1,5 +1,5 @@
 # Runs the agent-canary listener (HTTP + DNS) and keeps alerts and state in /data.
-#   docker run -d -p 8080:8080 -p 5353:5353/udp -v canary-data:/data IMAGE
+#   docker run -d -p 8080:8080 -p 5300:5300/udp -v canary-data:/data IMAGE
 # Other subcommands work too: docker run --rm IMAGE --help
 FROM python:3.14.10-slim-trixie AS build
 
@@ -22,7 +22,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     AGENT_CANARY_HOME=/data/state
 USER canary
 VOLUME /data
-EXPOSE 8080 5353/udp
+EXPOSE 8080 5300/udp
 
 ENTRYPOINT ["agent-canary"]
-CMD ["listen", "--http", "0.0.0.0:8080", "--dns", "0.0.0.0:5353", "--log", "/data/alerts.jsonl"]
+CMD ["listen", "--http", "0.0.0.0:8080", "--dns", "0.0.0.0:5300", "--log", "/data/alerts.jsonl"]

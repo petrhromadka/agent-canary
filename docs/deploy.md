@@ -73,21 +73,21 @@ queries to your listener.
 Ports below 1024 need privilege. Do not run the listener as root. Two safe options:
 
 **Option A - bind a high port and redirect with nftables (or iptables).** Run the
-listener on `5353` and redirect inbound 53 to it:
+listener on `5300` (5353 is taken by mDNS on most hosts) and redirect inbound 53 to it:
 
 ```bash
 # nftables
 sudo nft add table ip nat
 sudo nft add chain ip nat prerouting '{ type nat hook prerouting priority -100 ; }'
-sudo nft add rule ip nat prerouting udp dport 53 redirect to :5353
+sudo nft add rule ip nat prerouting udp dport 53 redirect to :5300
 ```
 
 ```bash
 # iptables equivalent
-sudo iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5353
+sudo iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
 ```
 
-Then `listen --dns 0.0.0.0:5353`.
+Then `listen --dns 0.0.0.0:5300`.
 
 **Option B - grant the capability to bind low ports** via the systemd unit's
 `AmbientCapabilities=CAP_NET_BIND_SERVICE` (see section 5) and bind `0.0.0.0:53`
