@@ -101,8 +101,7 @@ def _cmd_listen(args: argparse.Namespace, state_dir: Path) -> int:
     if args.http is None and args.dns is None:
         args.http = ("127.0.0.1", 8080)
 
-    def loader() -> list:
-        return store.load_all(state_dir)
+    loader = store.CachedLoader(state_dir)  # one per process: rereads only changed manifests
 
     def on_alert(alert: Alert) -> None:
         # Console first, so a failing log (disk full, permissions) cannot swallow the alert.
