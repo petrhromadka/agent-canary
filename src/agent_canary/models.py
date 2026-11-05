@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -35,16 +36,52 @@ class Manifest:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Manifest:
+    def from_dict(cls, data: Any) -> Manifest:
+        """Build from parsed JSON. Raises ValueError unless every field has the expected type."""
+        from agent_canary.store import TOKEN_ID_RE
+
+        def text(value: Any, what: str) -> str:
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"manifest {what} must be a non-empty string")
+            return value
+
+        def optional(value: Any, what: str) -> str | None:
+            return None if value is None else text(value, what)
+
+        def array(value: Any, what: str) -> list[Any]:
+            if not isinstance(value, list):
+                raise ValueError(f"manifest {what} must be a list")
+            return value
+
+        if not isinstance(data, dict):
+            raise ValueError("manifest must be a JSON object")
+        token_id = text(data.get("token_id"), "token_id")
+        if not TOKEN_ID_RE.match(token_id):
+            raise ValueError(f"invalid token id: {token_id!r}")
+        secrets = []
+        for item in array(data.get("secrets", []), "secrets"):
+            if not isinstance(item, dict) or set(item) != {"kind", "path", "name", "value"}:
+                raise ValueError("manifest secret must have exactly kind, path, name, value")
+            secret = Secret(**{key: text(item[key], f"secret {key}") for key in item})
+            if len(secret.value) < 8:
+                raise ValueError("manifest secret value must be at least 8 characters")
+            secrets.append(secret)
+        files = [text(f, "file") for f in array(data.get("files", []), "files")]
+        hashes = data.get("file_hashes", {})
+        if not isinstance(hashes, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) and re.fullmatch("[0-9a-f]{64}", v)
+            for k, v in hashes.items()
+        ):
+            raise ValueError("manifest file_hashes must map paths to sha256 hex digests")
         return cls(
-            token_id=data["token_id"],
-            workspace=data["workspace"],
-            created=data["created"],
-            dns_domain=data.get("dns_domain"),
-            http_url=data.get("http_url"),
-            secrets=tuple(Secret(**s) for s in data.get("secrets", [])),
-            files=tuple(data.get("files", [])),
-            file_hashes=dict(data.get("file_hashes", {})),
+            token_id=token_id,
+            workspace=text(data.get("workspace"), "workspace"),
+            created=text(data.get("created"), "created"),
+            dns_domain=optional(data.get("dns_domain"), "dns_domain"),
+            http_url=optional(data.get("http_url"), "http_url"),
+            secrets=tuple(secrets),
+            files=tuple(files),
+            file_hashes=dict(hashes),
         )
 
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from agent_canary import alerts, store
 from agent_canary.detect import find_matches
 from agent_canary.models import Manifest, Secret
@@ -38,3 +40,26 @@ def test_alert_log_has_no_secret_value(tmp_path):
     assert "fake-value-123" not in text
     assert json.loads(text)["matches"][0]["name"] == "API_KEY"
     assert "\x1b" not in alerts.format_alert(alert)
+
+
+def test_load_all_skips_invalid_or_misnamed_manifests(tmp_path):
+    good = manifest()
+    store.save(good, tmp_path)
+    base = good.to_dict()
+    secret = base["secrets"][0]
+    broken = [
+        {"secrets": [{**secret, "value": 123}]},
+        {"secrets": [{**secret, "value": "x" * 7}]},
+        {"token_id": ""},
+        {"created": 5},
+        {"file_hashes": {".env": "0" * 63}},
+    ]
+    for letter, override in zip("23456", broken, strict=True):
+        stem = "b" * 11 + letter
+        (tmp_path / f"{stem}.json").write_text(json.dumps({**base, "token_id": stem, **override}))
+    (tmp_path / "cccccccccccc.json").write_text(json.dumps(base))  # holds another token's id
+    (tmp_path / "dddddddddddd.json").write_text("[" * 100_000 + "]" * 100_000)
+
+    assert store.load_all(tmp_path) == [good]
+    with pytest.raises(ValueError, match="holds token id"):
+        store.load("cccccccccccc", tmp_path)

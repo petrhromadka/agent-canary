@@ -80,8 +80,8 @@ def _cmd_plant(args: argparse.Namespace, state_dir: Path) -> int:
             http_url=args.http_url,
             state_dir=state_dir,
         )
-    except (ValueError, FileExistsError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (ValueError, OSError) as exc:
+        print(f"error: {alerts.sanitize(str(exc), limit=1000)}", file=sys.stderr)
         return 2
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
@@ -159,8 +159,8 @@ def _cmd_list(_: argparse.Namespace, state_dir: Path) -> int:
     manifests = store.load_all(state_dir)
     if not manifests:
         print("no planted canaries")
-    for m in manifests:
-        print(f"{m.token_id}  {m.created}  {len(m.files)} files  {m.workspace}")
+    for m in manifests:  # manifest text is untrusted: the state dir may have been tampered with
+        print(alerts.sanitize(f"{m.token_id}  {m.created}  {len(m.files)} files  {m.workspace}"))
     return 0
 
 
@@ -173,16 +173,16 @@ def _cmd_clean(args: argparse.Namespace, state_dir: Path) -> int:
         try:
             targets = [store.load(args.token_id, state_dir)]
         except (ValueError, OSError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            print(f"error: {alerts.sanitize(str(exc))}", file=sys.stderr)
             return 2
     for manifest in targets:
         try:
             warnings = clean(manifest, state_dir)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+        except (ValueError, OSError) as exc:
+            print(f"error: {alerts.sanitize(str(exc))}", file=sys.stderr)
             return 2
         for warning in warnings:
-            print(f"warning: {warning}", file=sys.stderr)
+            print(f"warning: {alerts.sanitize(warning)}", file=sys.stderr)
         print(f"cleaned {manifest.token_id}")
     return 0
 

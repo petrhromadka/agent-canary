@@ -1,6 +1,7 @@
 import base64
 import dataclasses
 import hashlib
+import os
 import shutil
 import subprocess
 
@@ -40,6 +41,8 @@ def test_plant_writes_realistic_files_and_manifest(tmp_path):
     assert f"WEBHOOK_URL={URL}t/{tid}/env" in (ws / ".env").read_text()
     assert f"endpoint_url = {URL}t/{tid}/aws" in (ws / ".aws/config").read_text()
     assert f"HostName ssh.{tid}.{DNS}" in (ws / ".ssh/config").read_text()
+    key_path = (ws / ".ssh/id_ed25519").resolve().as_posix()
+    assert f'IdentityFile "{key_path}"' in (ws / ".ssh/config").read_text()
 
     # The recorded private key line is one full line of the key body, past the constant header.
     key_lines = (ws / ".ssh/id_ed25519").read_text().splitlines()
@@ -75,7 +78,12 @@ def test_plant_refuses_bad_input_and_keeps_existing_files(tmp_path, capsys):
     (ws / ".env").write_text("MINE=1\n")
     with pytest.raises(ValueError, match="inside the workspace"):
         plant(ws, state_dir=ws / "state")
-    for bad in ({"dns_domain": "bad_label.example"}, {"http_url": "ftp://host"}):
+    for bad in (
+        {"dns_domain": "bad_label.example"},
+        {"dns_domain": "ab\n.example.com"},
+        {"http_url": "ftp://host"},
+        {"http_url": "http://h:8080/x\n[profile p]\ncredential_process = x"},
+    ):
         with pytest.raises(ValueError):
             plant(ws, state_dir=tmp_path / "state", **bad)
 
@@ -95,15 +103,76 @@ def test_clean_removes_only_untouched_files_inside_workspace(tmp_path):
     (ws / ".env").write_text("edited by the user\n")
     outside = tmp_path / "outside.txt"
     outside.write_text("keep me")
-    tampered = dataclasses.replace(manifest, files=(*manifest.files, "../outside.txt"))
-    tampered.file_hashes["../outside.txt"] = hashlib.sha256(b"keep me").hexdigest()
+    (ws / "notes.txt").write_text("keep me")  # inside, known content, but plant never creates it
+    extra = ("../outside.txt", "notes.txt")
+    tampered = dataclasses.replace(manifest, files=(*manifest.files, *extra))
+    for rel in extra:
+        tampered.file_hashes[rel] = hashlib.sha256(b"keep me").hexdigest()
     store.save(tampered, state)
 
     warnings = clean(store.load(manifest.token_id, state), state)
-    assert len(warnings) == 2
-    assert any("outside" in w for w in warnings) and any("modified" in w for w in warnings)
+    assert len(warnings) == 3
+    assert sum("not a file plant creates" in w for w in warnings) == 2
+    assert any("modified" in w for w in warnings)
 
     assert (ws / ".env").read_text() == "edited by the user\n"
     assert outside.read_text() == "keep me"
-    assert sorted(p.name for p in ws.iterdir()) == [".env"]
+    assert sorted(p.name for p in ws.iterdir()) == [".env", "notes.txt"]
     assert store.load_all(state) == []
+
+
+def link_dir(link, target):
+    """Make link point at target: a symlink, else (Windows without the privilege) a junction."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("symlinks unavailable")
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, check=False
+        )
+        if made.returncode != 0:
+            pytest.skip("neither symlinks nor junctions available")
+
+
+def test_plant_and_clean_refuse_linked_or_blocked_directories(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    real_aws = tmp_path / "home_aws"
+    real_aws.mkdir()
+    link_dir(ws / ".aws", real_aws)
+    (ws / ".ssh").write_text("a regular file, not a directory")
+
+    manifest, warnings = plant(ws, http_url=URL, state_dir=tmp_path / "state")
+    assert list(real_aws.iterdir()) == []
+    assert manifest.files == (".env", ".npmrc")
+    assert len(warnings) == 5 and all("not written" in w for w in warnings)
+
+    # A tampered manifest naming a planted path behind the link does not reach outside.
+    (real_aws / "config").write_text("keep me")
+    tampered = dataclasses.replace(manifest, files=(*manifest.files, ".aws/config"))
+    tampered.file_hashes[".aws/config"] = hashlib.sha256(b"keep me").hexdigest()
+    store.save(tampered, tmp_path / "state")
+    warnings = clean(store.load(manifest.token_id, tmp_path / "state"), tmp_path / "state")
+    assert len(warnings) == 1 and "outside the workspace" in warnings[0]
+    assert (real_aws / "config").read_text() == "keep me"
+
+
+def test_failure_mid_plant_removes_everything_written(tmp_path, monkeypatch, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    real_open = os.open
+    calls = []
+
+    def flaky_open(path, *args):
+        calls.append(path)
+        if len(calls) == 4:  # first file in .ssh, after .aws and .env were written
+            raise PermissionError("denied")
+        return real_open(path, *args)
+
+    monkeypatch.setattr(os, "open", flaky_open)
+    assert main(["--state-dir", str(tmp_path / "state"), "plant", str(ws)]) == 2
+    assert capsys.readouterr().err == "error: denied\n"
+    assert len(calls) == 4
+    assert list(ws.iterdir()) == []
+    assert store.load_all(tmp_path / "state") == []

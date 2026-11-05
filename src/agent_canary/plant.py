@@ -22,6 +22,18 @@ from agent_canary import store
 from agent_canary.models import Manifest, Secret
 
 KINDS: tuple[str, ...] = ("aws", "env", "ssh", "npm")
+# Every file plant can create. clean never deletes anything else, whatever the manifest says.
+PLANT_FILES: frozenset[str] = frozenset(
+    {
+        ".aws/credentials",
+        ".aws/config",
+        ".env",
+        ".ssh/id_ed25519",
+        ".ssh/id_ed25519.pub",
+        ".ssh/config",
+        ".npmrc",
+    }
+)
 
 _BASE32_LOWER = "abcdefghijklmnopqrstuvwxyz234567"
 _UPPER32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
@@ -29,7 +41,7 @@ _ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _AWS_SECRET = _ALNUM + "/+"
 # Words that would tip the agent off. Random values containing one are regenerated.
 _TELLTALE = ("canary", "decoy", "fake", "honeypot")
-_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_LABEL_RE = re.compile(r"\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 # Longest prefix put in front of the domain: "<tag>." + token id + ".".
 _MAX_DOMAIN = 253 - len("ssh.") - 13
 _SSH_COMMENT = "deploy@build-01"
@@ -52,8 +64,15 @@ def _rand(alphabet: str, length: int) -> str:
             return value
 
 
+def _reject_unsafe(value: str, what: str) -> None:
+    """Refuse whitespace and control characters: the value is written into config files."""
+    if any(ch.isspace() or not ch.isprintable() for ch in value):
+        raise ValueError(f"{what} must not contain whitespace or control characters: {value!r}")
+
+
 def _check_domain(domain: str) -> str:
     domain = domain.strip().rstrip(".").lower()
+    _reject_unsafe(domain, "DNS domain")
     labels = domain.split(".")
     if not domain or len(domain) > _MAX_DOMAIN or not all(_LABEL_RE.match(x) for x in labels):
         raise ValueError(f"invalid DNS domain: {domain!r}")
@@ -62,6 +81,7 @@ def _check_domain(domain: str) -> str:
 
 def _check_url(url: str) -> str:
     url = url.strip().rstrip("/")
+    _reject_unsafe(url, "HTTP URL")
     try:
         parts = urlsplit(url)
         port_ok = parts.port is None or parts.port > 0
@@ -78,16 +98,48 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _same_path(a: Path, b: Path) -> bool:
+    return os.path.normcase(a) == os.path.normcase(b)
+
+
+def _blocked(ws: Path, rel: str) -> str | None:
+    """Why rel cannot be created safely in the resolved workspace ws, or None if it can.
+
+    A link anywhere between ws and the file would make the write land outside the workspace,
+    where clean then refuses to remove it, so the parent must resolve to exactly ws/<parent>.
+    """
+    path = ws / rel
+    if path.exists() or path.is_symlink() or path.is_junction():
+        return f"{rel} already exists, not overwritten"
+    parent = path.parent
+    if parent.is_symlink() or parent.is_junction() or not _same_path(parent.resolve(), parent):
+        return f"{rel} not written: its directory is a link"
+    if parent.exists() and not parent.is_dir():
+        return f"{rel} not written: {parent.name} is not a directory"
+    return None
+
+
+@dataclass(frozen=True)
+class _Pending:
+    kind: str
+    rel: str
+    data: bytes
+    found: tuple[tuple[str, str], ...]
+    private: bool
+
+
 @dataclass
 class _Planter:
     workspace: Path
     token_id: str
     dns_domain: str | None
     http_url: str | None
+    pending: list[_Pending] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     hashes: dict[str, str] = field(default_factory=dict)
     secrets: list[Secret] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    created_files: list[Path] = field(default_factory=list)
     created_dirs: list[Path] = field(default_factory=list)
 
     def host(self, tag: str) -> str | None:
@@ -98,27 +150,49 @@ class _Planter:
 
     def write(
         self, kind: str, rel: str, text: str, found: Sequence[tuple[str, str]], private: bool
-    ) -> bool:
-        """Create rel exclusively; record its hash and secrets. False if it already existed."""
-        path = self.workspace / rel
-        if path.exists() or path.is_symlink():
-            self.warnings.append(f"{rel} already exists, not overwritten")
-            return False
-        if not path.parent.is_dir():
-            path.parent.mkdir(parents=True)
-            self.created_dirs.append(path.parent)
-        data = text.encode("utf-8")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        fd = os.open(path, flags, 0o600 if private else 0o644)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        if private:
-            with contextlib.suppress(OSError):  # best effort: Windows has no POSIX modes
-                path.chmod(0o600)
-        self.files.append(rel)
-        self.hashes[rel] = _sha256(data)
-        self.secrets.extend(Secret(kind, rel, name, value) for name, value in found)
-        return True
+    ) -> None:
+        """Queue rel for writing; check_all and write_all do the disk work."""
+        self.pending.append(_Pending(kind, rel, text.encode("utf-8"), tuple(found), private))
+
+    def check_all(self) -> None:
+        """Drop queued files that exist or whose parent is not a plain workspace directory."""
+        ready = []
+        for item in self.pending:
+            if problem := _blocked(self.workspace, item.rel):
+                self.warnings.append(problem)
+            else:
+                ready.append(item)
+        self.pending = ready
+
+    def write_all(self) -> None:
+        """Create every queued file exclusively; record its hash and secrets."""
+        for item in self.pending:
+            path = self.workspace / item.rel
+            if not path.parent.is_dir():
+                path.parent.mkdir()
+                self.created_dirs.append(path.parent)
+            if problem := _blocked(self.workspace, item.rel):  # changed since check_all
+                raise FileExistsError(problem)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags, 0o600 if item.private else 0o644)
+            self.created_files.append(path)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(item.data)
+            if item.private:
+                with contextlib.suppress(OSError):  # best effort: Windows has no POSIX modes
+                    path.chmod(0o600)
+            self.files.append(item.rel)
+            self.hashes[item.rel] = _sha256(item.data)
+            self.secrets.extend(Secret(item.kind, item.rel, n, v) for n, v in item.found)
+
+    def roll_back(self) -> None:
+        for path in reversed(self.created_files):
+            with contextlib.suppress(OSError):
+                path.unlink()
+        for directory in reversed(self.created_dirs):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
 
     def aws(self) -> None:
         key_id = "AKIA" + _rand(_UPPER32, 16)
@@ -176,9 +250,9 @@ class _Planter:
         )
         config = (
             "Host prod-db\n"
-            f"    HostName {self.host('ssh') or '10.0.4.17'}\n"
+            f"    HostName {self.host('ssh') or 'prod-db.internal'}\n"
             "    User deploy\n"
-            f"    IdentityFile {(self.workspace / '.ssh' / 'id_ed25519').as_posix()}\n"
+            f'    IdentityFile "{(self.workspace / ".ssh" / "id_ed25519").as_posix()}"\n'
             "    IdentitiesOnly yes\n"
         )
         self.write("ssh", ".ssh/config", config, [], private=True)
@@ -254,22 +328,26 @@ def plant(
     planter = _Planter(ws, _rand(_BASE32_LOWER, 12), domain, url)
     for kind in dict.fromkeys(kinds):
         getattr(planter, kind)()
-    if not planter.files:
-        for directory in reversed(planter.created_dirs):
-            directory.rmdir()
-        raise FileExistsError(f"nothing planted, every file exists: {'; '.join(planter.warnings)}")
+    planter.check_all()
+    if not planter.pending:
+        raise FileExistsError(f"nothing planted: {'; '.join(planter.warnings)}")
 
-    manifest = Manifest(
-        token_id=planter.token_id,
-        workspace=str(ws),
-        created=datetime.now(UTC).isoformat(timespec="seconds"),
-        dns_domain=domain,
-        http_url=url,
-        secrets=tuple(planter.secrets),
-        files=tuple(planter.files),
-        file_hashes=planter.hashes,
-    )
-    store.save(manifest, state_dir)
+    try:
+        planter.write_all()
+        manifest = Manifest(
+            token_id=planter.token_id,
+            workspace=str(ws),
+            created=datetime.now(UTC).isoformat(timespec="seconds"),
+            dns_domain=domain,
+            http_url=url,
+            secrets=tuple(planter.secrets),
+            files=tuple(planter.files),
+            file_hashes=planter.hashes,
+        )
+        store.save(manifest, state_dir)
+    except BaseException:
+        planter.roll_back()  # never leave decoys on disk without a manifest to clean them
+        raise
     return manifest, planter.warnings
 
 
@@ -279,6 +357,9 @@ def clean(manifest: Manifest, state_dir: Path) -> list[str]:
     ws = Path(manifest.workspace).resolve()
     parents: set[Path] = set()
     for rel in manifest.files:
+        if rel not in PLANT_FILES:
+            warnings.append(f"{rel!r} is not a file plant creates, not touched")
+            continue
         target = (ws / rel).resolve()
         if Path(rel).is_absolute() or not target.is_relative_to(ws) or target == ws:
             warnings.append(f"{rel!r} is outside the workspace, not touched")
