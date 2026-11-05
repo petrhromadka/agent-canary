@@ -13,7 +13,7 @@ Channel = Literal["dns", "http", "scan"]
 class Secret:
     """One fake secret value written into a planted file."""
 
-    kind: str  # planter kind that produced it: "aws", "env", "ssh", "npm"
+    kind: str  # planter kind that produced it, one of plant.KINDS
     path: str  # file path relative to the workspace, forward slashes
     name: str  # e.g. "aws_secret_access_key" or "API_KEY"
     value: str
