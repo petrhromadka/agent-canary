@@ -139,6 +139,7 @@ def canary(tmp_path: Path) -> object:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
         bufsize=1,
     )
     stdout: list[str] = []
@@ -157,6 +158,8 @@ def canary(tmp_path: Path) -> object:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+        if proc.stdout is not None:
+            proc.stdout.close()
 
 
 def test_leaky_agent_is_caught_on_both_channels(canary: Canary) -> None:
