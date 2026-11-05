@@ -183,8 +183,8 @@ gives one alert, with the line of its first hit. Exit codes:
 
 Unreadable files and directories are reported on stderr and force exit code 2 even if leaks were
 found too, so a 2 does not mean "clean". Symlink and junction loops are pruned, and symlinked
-files inside a directory are not read. `scan` ends with a `skipped: ...` summary line on stderr
-that reports what was left out.
+files inside a directory are not read. When anything was left out, `scan` ends with a
+`skipped: ...` summary line on stderr.
 
 Here line 3 of the transcript is a tool call that sent the `API_KEY` value from `.env` in a `curl`
 command:
@@ -196,6 +196,7 @@ $ echo $?
 1
 $ agent-canary scan ~/project
 no canaries found
+skipped: 3 planted decoys, 1 dir (.git)
 $ echo $?
 0
 ```
